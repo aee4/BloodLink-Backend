@@ -11,6 +11,27 @@ public sealed class ApiExceptionMiddleware(RequestDelegate next, ILogger<ApiExce
         try
         {
             await next(context);
+            if (!context.Response.HasStarted
+                && context.Request.Path.Equals("/api/v1/auth/refresh", StringComparison.OrdinalIgnoreCase)
+                && context.Request.Method == HttpMethods.Post
+                && context.Response.StatusCode == StatusCodes.Status400BadRequest)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.ContentType = "application/problem+json";
+                await JsonSerializer.SerializeAsync(context.Response.Body, new ProblemDetails
+                {
+                    Status = StatusCodes.Status401Unauthorized,
+                    Title = "Authentication required",
+                    Detail = "The refresh session is invalid or expired.",
+                    Extensions =
+                    {
+                        ["traceId"] = context.TraceIdentifier,
+                        ["code"] = "invalid_refresh"
+                    }
+                }, cancellationToken: context.RequestAborted);
+                return;
+            }
             if (!context.Response.HasStarted && context.Response.StatusCode is StatusCodes.Status401Unauthorized or StatusCodes.Status403Forbidden)
             {
                 var isUnauthenticated = context.Response.StatusCode == StatusCodes.Status401Unauthorized;

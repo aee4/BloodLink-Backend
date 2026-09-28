@@ -7,6 +7,7 @@ Common failures: 400 malformed/invalid input, 401 missing/invalid/expired bearer
 | Method and path | Request / response | Policy and scope | Success; failure; database effect |
 | --- | --- | --- | --- |
 | `POST /auth/login` | `LoginRequest`; `AccessTokenResponse` with safe `ApiUserResponse` | Anonymous; Identity validates credentials and account eligibility | 200; 400/401. Updates last login and writes audit row. |
+| `POST /auth/refresh` | `RefreshRequest`; rotated `AccessTokenResponse` | Anonymous; one-time refresh credential | 200; generic 401. Rotates the credential atomically; stores only its hash. |
 | `GET /auth/me` | none; `ApiUserResponse` | `AccountSession`; own current account | 200; 401/403/404. Read only. |
 | `POST /auth/logout` | none; empty | `AccountSession`; current user | 204; 401/403/503. Rotates security stamp, revoking all current tokens. |
 | `POST /auth/change-password` | `ChangePasswordRequest`; empty | `AccountSession`; current user | 204; 400/401/403/503. Identity password and stamp update plus audit. |
@@ -56,4 +57,4 @@ Common failures: 400 malformed/invalid input, 401 missing/invalid/expired bearer
 
 ## Deliberately absent
 
-There is no `/api/v1/auth/refresh` because no refresh token is issued, and no password-reset route because delivery is disabled. Access tokens are short-lived; logout/password change rotates the Identity security stamp. No EF entity, password hash, security stamp, plaintext password, reset token, stack trace, or internal exception message is a response contract.
+There is no password-reset route because delivery is disabled. Access tokens are short-lived; refresh credentials rotate and are stored only as hashes. Logout/password change invalidates refresh sessions and rotates the Identity security stamp. No EF entity, password hash, security stamp, plaintext password, reset token, stack trace, or internal exception message is a response contract.

@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using BloodLink.Application.Contracts;
 using BloodLink.Domain.Entities;
@@ -39,7 +41,7 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
         var paths = document.RootElement.GetProperty("paths");
         var expectedPaths = new[]
         {
-            "/api/v1/auth/login", "/api/v1/auth/me", "/api/v1/auth/logout", "/api/v1/auth/change-password",
+            "/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/me", "/api/v1/auth/logout", "/api/v1/auth/change-password",
             "/api/v1/facilities/register", "/api/v1/facilities/me", "/api/v1/system/facilities",
             "/api/v1/system/facilities/{id}", "/api/v1/staff", "/api/v1/staff/{id}/activate",
             "/api/v1/staff/{id}/deactivate", "/api/v1/inventory", "/api/v1/inventory/adjustments",
@@ -53,7 +55,6 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
             "/api/v1/notifications/read-all", "/api/v1/dashboard"
         };
         foreach (var path in expectedPaths) Assert.True(paths.TryGetProperty(path, out _), $"Missing OpenAPI path {path}.");
-        Assert.False(paths.TryGetProperty("/api/v1/auth/refresh", out _));
         Assert.False(paths.TryGetProperty("/api/v1/auth/reset-password", out _));
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/inventory")).StatusCode);
@@ -120,6 +121,191 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
         Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsync("/api/v1/auth/logout", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/v1/auth/me")).StatusCode);
     }
+
+    [Fact]
+    public async Task Refresh_rotates_credentials_and_replay_revokes_the_family()
+    {
+        using var client = fixture.Application.CreateClient();
+        var login = await LoginAsync(client, fixture.AdminEmail);
+        var originalRefresh = login.GetProperty("refreshToken").GetString()!;
+
+        var rotated = await RefreshAsync(client, originalRefresh);
+        Assert.Equal(HttpStatusCode.OK, rotated.StatusCode);
+        using var rotatedJson = JsonDocument.Parse(await rotated.Content.ReadAsStringAsync());
+        var root = rotatedJson.RootElement;
+        var nextAccess = root.GetProperty("accessToken").GetString()!;
+        var nextRefresh = root.GetProperty("refreshToken").GetString()!;
+        Assert.NotEqual(originalRefresh, nextRefresh);
+        Assert.Equal(15 * 60, root.GetProperty("expiresIn").GetInt32());
+        Assert.True(root.GetProperty("refreshTokenExpiresAtUtc").GetDateTime() > DateTime.UtcNow.AddDays(13));
+        Assert.False(root.ToString().Contains("PasswordHash", StringComparison.OrdinalIgnoreCase));
+        Assert.False(root.ToString().Contains("SecurityStamp", StringComparison.OrdinalIgnoreCase));
+        await using (var db = fixture.CreateContext())
+        {
+            var oldSession = await db.RefreshSessions.SingleAsync(item => item.TokenHash == HashRefreshToken(originalRefresh));
+            Assert.Equal(HashRefreshToken(nextRefresh), oldSession.ReplacedByTokenHash);
+            Assert.DoesNotContain(originalRefresh, oldSession.TokenHash, StringComparison.Ordinal);
+        }
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", nextAccess);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/v1/auth/me")).StatusCode);
+
+        using var replay = await RefreshAsync(client, originalRefresh);
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+        Assert.Equal("no-store", replay.Headers.CacheControl?.ToString());
+        var replayBody = await replay.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(originalRefresh, replayBody, StringComparison.Ordinal);
+        using var afterReplay = await RefreshAsync(client, nextRefresh);
+        Assert.Equal(HttpStatusCode.Unauthorized, afterReplay.StatusCode);
+    }
+
+    [Fact]
+    public async Task Refresh_rejects_unknown_malformed_expired_and_logged_out_credentials()
+    {
+        using var client = fixture.Application.CreateClient();
+        using var malformed = await RefreshAsync(client, "not-a-valid-refresh-token");
+        Assert.Equal(HttpStatusCode.Unauthorized, malformed.StatusCode);
+        var malformedText = await malformed.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("not-a-valid-refresh-token", malformedText, StringComparison.Ordinal);
+        using var malformedJson = JsonDocument.Parse(malformedText);
+        Assert.Equal(401, malformedJson.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal("invalid_refresh", malformedJson.RootElement.GetProperty("code").GetString());
+        using var malformedBody = await client.PostAsync("/api/v1/auth/refresh", new StringContent("{", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Unauthorized, malformedBody.StatusCode);
+
+        using var unknown = await RefreshAsync(client, Convert.ToBase64String(RandomNumberGenerator.GetBytes(64)));
+        Assert.Equal(HttpStatusCode.Unauthorized, unknown.StatusCode);
+
+        var deletedAccount = await fixture.CreateAdditionalApprovedFacilityAdminAsync();
+        var deletedAccountLogin = await LoginAsync(client, deletedAccount.AdminEmail);
+        var orphanedCredential = deletedAccountLogin.GetProperty("refreshToken").GetString()!;
+        await using (var db = fixture.CreateContext())
+        {
+            var user = await db.Users.SingleAsync(item => item.Email == deletedAccount.AdminEmail);
+            await db.AuditLogs.Where(log => log.ActorUserId == user.Id).ExecuteDeleteAsync();
+            db.Users.Remove(user);
+            await db.SaveChangesAsync();
+        }
+        using var deletedUser = await RefreshAsync(client, orphanedCredential);
+        Assert.Equal(HttpStatusCode.Unauthorized, deletedUser.StatusCode);
+
+        var expiredLogin = await LoginAsync(client, fixture.AdminEmail);
+        var expiredToken = expiredLogin.GetProperty("refreshToken").GetString()!;
+        await using (var db = fixture.CreateContext())
+        {
+            var session = await db.RefreshSessions.SingleAsync(item => item.TokenHash == HashRefreshToken(expiredToken));
+            session.ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-1);
+            await db.SaveChangesAsync();
+        }
+        using var expired = await RefreshAsync(client, expiredToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
+
+        var logoutLogin = await LoginAsync(client, fixture.AdminEmail);
+        var logoutRefresh = logoutLogin.GetProperty("refreshToken").GetString()!;
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", logoutLogin.GetProperty("accessToken").GetString());
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsync("/api/v1/auth/logout", null)).StatusCode);
+        using var afterLogout = await RefreshAsync(client, logoutRefresh);
+        Assert.Equal(HttpStatusCode.Unauthorized, afterLogout.StatusCode);
+    }
+
+    [Fact]
+    public async Task Refresh_rejects_inactive_user_and_uses_current_role_and_facility_state()
+    {
+        using var client = fixture.Application.CreateClient();
+        var inactiveLogin = await LoginAsync(client, fixture.StaffEmail);
+        var inactiveRefresh = inactiveLogin.GetProperty("refreshToken").GetString()!;
+        await using (var db = fixture.CreateContext())
+        {
+            var user = await db.Users.SingleAsync(item => item.Email == fixture.StaffEmail);
+            user.IsActive = false;
+            await db.SaveChangesAsync();
+        }
+        using var inactive = await RefreshAsync(client, inactiveRefresh);
+        Assert.Equal(HttpStatusCode.Unauthorized, inactive.StatusCode);
+        await using (var db = fixture.CreateContext())
+        {
+            var user = await db.Users.SingleAsync(item => item.Email == fixture.StaffEmail);
+            user.IsActive = true;
+            await db.SaveChangesAsync();
+        }
+
+        var currentStateLogin = await LoginAsync(client, fixture.AdminEmail);
+        var currentStateRefresh = currentStateLogin.GetProperty("refreshToken").GetString()!;
+        var newFacility = await fixture.CreateAdditionalApprovedFacilityAdminAsync();
+        await using (var scope = fixture.Application.Services.CreateAsyncScope())
+        {
+            var users = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await users.FindByEmailAsync(fixture.AdminEmail);
+            Assert.NotNull(user);
+            user!.FacilityId = newFacility.FacilityId;
+            Assert.True((await users.RemoveFromRoleAsync(user, RoleNames.FacilityAdmin)).Succeeded);
+            Assert.True((await users.AddToRoleAsync(user, RoleNames.SystemAdmin)).Succeeded);
+            Assert.True((await users.UpdateAsync(user)).Succeeded);
+        }
+
+        using var refreshed = await RefreshAsync(client, currentStateRefresh);
+        Assert.Equal(HttpStatusCode.OK, refreshed.StatusCode);
+        using var body = JsonDocument.Parse(await refreshed.Content.ReadAsStringAsync());
+        Assert.Equal(newFacility.FacilityId, body.RootElement.GetProperty("user").GetProperty("facilityId").GetGuid());
+        Assert.Contains("SystemAdmin", body.RootElement.GetProperty("user").GetProperty("roles").EnumerateArray()
+            .Select(role => role.GetString()));
+
+        await using (var scope = fixture.Application.Services.CreateAsyncScope())
+        {
+            var users = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+            var user = await users.FindByEmailAsync(fixture.AdminEmail);
+            Assert.NotNull(user);
+            user!.FacilityId = fixture.FacilityId;
+            Assert.True((await users.RemoveFromRoleAsync(user, RoleNames.SystemAdmin)).Succeeded);
+            Assert.True((await users.AddToRoleAsync(user, RoleNames.FacilityAdmin)).Succeeded);
+            Assert.True((await users.UpdateAsync(user)).Succeeded);
+        }
+    }
+
+    [Theory]
+    [InlineData(FacilityStatus.Pending)]
+    [InlineData(FacilityStatus.Rejected)]
+    [InlineData(FacilityStatus.Suspended)]
+    public async Task Refresh_refuses_non_operational_facility_and_works_after_restoration(FacilityStatus blockedStatus)
+    {
+        using var client = fixture.Application.CreateClient();
+        var login = await LoginAsync(client, fixture.AdminEmail);
+        var refreshToken = login.GetProperty("refreshToken").GetString()!;
+        await using (var db = fixture.CreateContext())
+        {
+            var facility = await db.Facilities.SingleAsync(item => item.Id == fixture.FacilityId);
+            facility.Status = blockedStatus;
+            await db.SaveChangesAsync();
+        }
+        using var blocked = await RefreshAsync(client, refreshToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, blocked.StatusCode);
+        await using (var db = fixture.CreateContext())
+        {
+            var facility = await db.Facilities.SingleAsync(item => item.Id == fixture.FacilityId);
+            facility.Status = FacilityStatus.Approved;
+            await db.SaveChangesAsync();
+        }
+        using var restored = await RefreshAsync(client, refreshToken);
+        Assert.Equal(HttpStatusCode.OK, restored.StatusCode);
+    }
+
+    private static async Task<JsonElement> LoginAsync(HttpClient client, string email)
+    {
+        using var response = await client.PostAsJsonAsync("/api/v1/auth/login", new
+        {
+            email,
+            password = ApiDatabaseFixture.Password
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return document.RootElement.Clone();
+    }
+
+    private static Task<HttpResponseMessage> RefreshAsync(HttpClient client, string refreshToken) =>
+        client.PostAsJsonAsync("/api/v1/auth/refresh", new { refreshToken });
+
+    private static string HashRefreshToken(string token) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 
     [Fact]
     public async Task Staff_bearer_can_create_need_and_role_denial_has_no_write()

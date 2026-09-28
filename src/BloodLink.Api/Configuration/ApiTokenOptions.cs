@@ -7,4 +7,5 @@ public sealed class ApiTokenOptions
     public string Audience { get; set; } = "BloodLink.Frontend";
     public string SigningKey { get; set; } = string.Empty;
     public int LifetimeMinutes { get; set; } = 15;
+    public int RefreshTokenLifetimeDays { get; set; } = 14;
 }

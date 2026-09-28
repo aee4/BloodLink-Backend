@@ -8,6 +8,7 @@ using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Data.Seed;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
@@ -27,6 +28,10 @@ builder.Services.Configure<ApiTokenOptions>(options =>
     builder.Configuration.GetSection(ApiTokenOptions.SectionName).Bind(options);
     options.SigningKey = signingKey;
 });
+var tokenLifetimeMinutes = builder.Configuration.GetValue<int?>($"{ApiTokenOptions.SectionName}:LifetimeMinutes") ?? 15;
+var refreshLifetimeDays = builder.Configuration.GetValue<int?>($"{ApiTokenOptions.SectionName}:RefreshTokenLifetimeDays") ?? 14;
+if (tokenLifetimeMinutes is < 1 or > 60 || refreshLifetimeDays is < 1 or > 90)
+    throw new InvalidOperationException("Configure access-token lifetime from 1 to 60 minutes and refresh-token lifetime from 1 to 90 days.");
 
 var origins = builder.Configuration.GetSection("Api:AllowedOrigins").Get<string[]>() ?? [];
 if (isDevelopment && origins.Length == 0)
@@ -40,6 +45,30 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.RemoveAll<ICurrentUserService>();
 builder.Services.AddScoped<ICurrentUserService, ApiCurrentUserService>();
 builder.Services.AddControllers();
+builder.Services.Configure<ApiBehaviorOptions>(options =>
+{
+    var defaultFactory = options.InvalidModelStateResponseFactory;
+    options.InvalidModelStateResponseFactory = context =>
+    {
+        if (context.HttpContext.Request.Path.Equals("/api/v1/auth/refresh", StringComparison.OrdinalIgnoreCase)
+            && context.HttpContext.Request.Method == HttpMethods.Post)
+        {
+            return new UnauthorizedObjectResult(new ProblemDetails
+            {
+                Status = StatusCodes.Status401Unauthorized,
+                Title = "Authentication required",
+                Detail = "The refresh session is invalid or expired.",
+                Extensions =
+                {
+                    ["traceId"] = context.HttpContext.TraceIdentifier,
+                    ["code"] = "invalid_refresh"
+                }
+            });
+        }
+
+        return defaultFactory(context);
+    };
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {

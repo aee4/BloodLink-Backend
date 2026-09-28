@@ -5,7 +5,9 @@ namespace BloodLink.Api.Contracts;
 
 public sealed record LoginRequest([Required, EmailAddress, StringLength(256)] string Email, [Required, StringLength(256)] string Password);
 public sealed record ChangePasswordRequest([Required] string CurrentPassword, [Required, MinLength(8)] string NewPassword);
-public sealed record AccessTokenResponse(string AccessToken, string TokenType, int ExpiresIn, ApiUserResponse User);
+public sealed record AccessTokenResponse(string AccessToken, string TokenType, int ExpiresIn,
+    string RefreshToken, DateTime RefreshTokenExpiresAtUtc, ApiUserResponse User);
+public sealed record RefreshRequest(string? RefreshToken);
 public sealed record ApiUserResponse(string Id, string Email, string FirstName, string LastName, Guid? FacilityId,
     IReadOnlyList<string> Roles, FacilityStatus? FacilityStatus, bool MustChangePassword);
 

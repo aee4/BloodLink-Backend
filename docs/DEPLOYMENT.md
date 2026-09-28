@@ -9,6 +9,8 @@ Set these through the deployment platform's environment or secret manager, never
 | `ASPNETCORE_ENVIRONMENT` | Use `Production` in production. |
 | `ConnectionStrings__DefaultConnection` | Required SQL Server connection string. The application reports a key-specific error if absent, without echoing its value. |
 | `Api__Tokens__SigningKey` | At least 32 random bytes; store as a secret. Keep stable across instances and restarts. |
+| `Api__Tokens__LifetimeMinutes` | Optional access-token lifetime, 1-60 minutes; default 15. |
+| `Api__Tokens__RefreshTokenLifetimeDays` | Optional rotating refresh-session lifetime, 1-90 days; default 14. |
 | `Api__AllowedOrigins__0` (and indexed additional origins) | Explicit frontend origins. Production entries must be HTTPS; wildcard is rejected. |
 | `Api__OpenApi__Enabled` | Optional; enable production OpenAPI only when intended. |
 | `BloodLink__DatabaseInitialization__Enabled` | Optional idempotent role/bootstrap initialization. Production startup never applies EF migrations. |

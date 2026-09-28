@@ -564,7 +564,7 @@ public sealed class RelationalNeedFulfilmentTests
 
             await using var verify = database.CreateContext();
             var migrations = await verify.Database.GetAppliedMigrationsAsync();
-            Assert.Equal(3, migrations.Count());
+            Assert.Equal(4, migrations.Count());
             Assert.Equal(2, await verify.Facilities.CountAsync());
             Assert.Equal(1, await verify.BloodNeeds.CountAsync());
             Assert.Equal(1, await verify.BloodRequests.CountAsync());

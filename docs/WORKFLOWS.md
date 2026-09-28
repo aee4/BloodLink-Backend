@@ -20,4 +20,4 @@ Notifications are recipient-scoped; related links are returned only for allowlis
 
 ## Account behavior
 
-Login, current-user, logout, and password-change routes use Identity-backed bearer authentication. Logout/password change rotate the security stamp and revoke prior tokens. No refresh token or password-reset delivery/endpoint exists. See [Authentication](AUTHENTICATION.md).
+Login, refresh, current-user, logout, and password-change routes use Identity-backed bearer authentication. Logout/password change rotate the security stamp and invalidate refresh sessions. Password-reset delivery and reset endpoints remain unavailable. See [Authentication](AUTHENTICATION.md).

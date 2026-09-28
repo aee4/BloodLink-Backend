@@ -18,6 +18,7 @@ public sealed class BloodLinkDbContext(DbContextOptions<BloodLinkDbContext> opti
     public DbSet<BloodRequestStatusHistory> BloodRequestStatusHistory => Set<BloodRequestStatusHistory>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+    public DbSet<RefreshSession> RefreshSessions => Set<RefreshSession>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
