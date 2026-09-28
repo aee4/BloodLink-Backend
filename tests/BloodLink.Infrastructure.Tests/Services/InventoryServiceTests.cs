@@ -1,0 +1,1413 @@
+using BloodLink.Application.DTOs;
+using BloodLink.Application.Interfaces;
+using BloodLink.Domain.Entities;
+using BloodLink.Domain.Enums;
+using BloodLink.Domain.Exceptions;
+using BloodLink.Infrastructure.Data;
+using BloodLink.Infrastructure.Services.Inventory;
+using Microsoft.EntityFrameworkCore;
+using Moq;
+using Xunit;
+using UnauthorizedAccessException = BloodLink.Domain.Exceptions.UnauthorizedAccessException;
+
+namespace BloodLink.Infrastructure.Tests.Services;
+
+public class InventoryServiceTests : IDisposable
+{
+    private readonly BloodLinkDbContext _context;
+    private readonly Mock<ICurrentUserService> _mockCurrentUserService;
+    private readonly InventoryService _service;
+
+    private readonly Guid _facilityId = Guid.NewGuid();
+    private readonly Guid _sourceFacilityId = Guid.NewGuid();
+    private readonly Guid _requestingFacilityId = Guid.NewGuid();
+    private readonly string _userId = "test-user-id";
+
+    public InventoryServiceTests()
+    {
+        var options = new DbContextOptionsBuilder<BloodLinkDbContext>()
+            .UseInMemoryDatabase(databaseName: $"BloodLinkTest_{Guid.NewGuid()}")
+            .Options;
+
+        _context = new BloodLinkDbContext(options);
+        _mockCurrentUserService = new Mock<ICurrentUserService>();
+
+        SetupDefaultMockBehavior();
+
+        _service = new InventoryService(_context, _mockCurrentUserService.Object);
+    }
+
+    public void Dispose()
+    {
+        _context?.Dispose();
+    }
+
+    private void SetupDefaultMockBehavior()
+    {
+        _mockCurrentUserService.Setup(s => s.IsAuthenticated).Returns(true);
+        _mockCurrentUserService.Setup(s => s.UserId).Returns(_userId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsActive).Returns(true);
+        _mockCurrentUserService.Setup(s => s.IsInRole(It.IsAny<string>())).Returns(true);
+        _mockCurrentUserService.Setup(s => s.BelongsToFacility(_facilityId)).Returns(true);
+    }
+
+    private void SeedApprovedFacility(Guid facilityId)
+    {
+        var facility = new Facility
+        {
+            Id = facilityId,
+            Name = "Test Facility",
+            FacilityType = FacilityType.Hospital,
+            RegistrationNumber = "REG001",
+            Region = "Test Region",
+            City = "Test City",
+            Address = "123 Test St",
+            ContactEmail = "test@facility.com",
+            ContactPhone = "555-0001",
+            Status = FacilityStatus.Approved,
+            CreatedByUserId = _userId,
+            CreatedAtUtc = DateTime.UtcNow,
+            ApprovedByUserId = _userId,
+            ApprovedAtUtc = DateTime.UtcNow
+        };
+
+        _context.Facilities.Add(facility);
+        _context.SaveChanges();
+    }
+
+    private BloodNeed AddNeed(Guid facilityId, BloodNeedStatus status, BloodType bloodType, int units)
+    {
+        var need = new BloodNeed
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = facilityId,
+            RequestedByUserId = _userId,
+            BloodType = bloodType,
+            UnitsNeeded = units,
+            Urgency = UrgencyLevel.Urgent,
+            NeededByUtc = DateTime.UtcNow.AddHours(8),
+            Status = status,
+            CreatedAtUtc = DateTime.UtcNow,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodNeeds.Add(need);
+        _context.SaveChanges();
+        return need;
+    }
+
+    private BloodRequest AddAcceptedRequest(FacilityStatus sourceStatus = FacilityStatus.Approved)
+    {
+        if (sourceStatus == FacilityStatus.Approved)
+        {
+            SeedApprovedFacility(_sourceFacilityId);
+        }
+        else
+        {
+            _context.Facilities.Add(new Facility
+            {
+                Id = _sourceFacilityId,
+                Name = "Source Facility",
+                Status = sourceStatus,
+                CreatedByUserId = _userId,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+            _context.SaveChanges();
+        }
+        SeedApprovedFacility(_requestingFacilityId);
+
+        _context.BloodInventory.Add(new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 20,
+            ReservedUnits = 5,
+            LowStockThreshold = 1,
+            UpdatedAtUtc = DateTime.UtcNow
+        });
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 8,
+            UnitsAccepted = 5,
+            Status = BloodRequestStatus.Accepted,
+            RequestedByAdminId = "requesting-admin",
+            RespondedByAdminId = "source-admin",
+            CreatedAtUtc = DateTime.UtcNow,
+            RespondedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodRequests.Add(request);
+        _context.SaveChanges();
+        return request;
+    }
+
+    private void SetMutationActor(string actor)
+    {
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(
+            actor == "requester-admin" ? _requestingFacilityId : _sourceFacilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin"))
+            .Returns(actor is "source-admin" or "requester-admin" or "inactive-admin");
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(actor == "staff");
+        _mockCurrentUserService.Setup(s => s.IsInRole("SystemAdmin")).Returns(actor == "system-admin");
+        _mockCurrentUserService.Setup(s => s.IsActive).Returns(actor != "inactive-admin");
+    }
+
+    #region GetOwnInventoryAsync Tests
+
+    [Fact]
+    public async Task GetOwnInventoryAsync_ReturnsAllInventoryItemsForFacility()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+
+        var inventory1 = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 50,
+            ReservedUnits = 10,
+            LowStockThreshold = 15,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        var inventory2 = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.ABNegative,
+            TotalUnits = 5,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.AddRange(inventory1, inventory2);
+        _context.SaveChanges();
+
+        // Act
+        var result = await _service.GetOwnInventoryAsync();
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, item => item.BloodType == BloodType.OPositive && item.AvailableUnits == 40);
+        Assert.Contains(result, item => item.BloodType == BloodType.ABNegative && item.AvailableUnits == 5);
+        Assert.Contains(result, item => item.BloodType == BloodType.OPositive && item.UpdatedAtUtc is not null);
+    }
+
+    [Fact]
+    public async Task GetOwnInventoryAsync_AllowsFacilityStaffViewOnlyRole()
+    {
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(false);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(true);
+
+        var result = await _service.GetOwnInventoryAsync();
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task GetOwnInventoryAsync_ThrowsWhenUserNotAuthenticated()
+    {
+        // Arrange
+        _mockCurrentUserService.Setup(s => s.IsAuthenticated).Returns(false);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => _service.GetOwnInventoryAsync());
+    }
+
+    [Fact]
+    public async Task GetOwnInventoryAsync_ThrowsWhenUserNotActive()
+    {
+        // Arrange
+        _mockCurrentUserService.Setup(s => s.IsActive).Returns(false);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => _service.GetOwnInventoryAsync());
+    }
+
+    #endregion
+
+    #region AdjustInventoryAsync Tests
+
+    [Fact]
+    public async Task AdjustInventoryAsync_CreatesNewInventoryAndTransaction()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        var request = new InventoryAdjustmentRequest(BloodType.OPositive, 20, "Stock received");
+
+        // Act
+        await _service.AdjustInventoryAsync(request);
+
+        // Assert
+        var inventory = await _context.BloodInventory
+            .FirstOrDefaultAsync(bi => bi.FacilityId == _facilityId && bi.BloodType == BloodType.OPositive);
+
+        Assert.NotNull(inventory);
+        Assert.Equal(20, inventory.TotalUnits);
+
+        var transaction = await _context.InventoryTransactions
+            .FirstOrDefaultAsync(t => t.BloodInventoryId == inventory.Id);
+
+        Assert.NotNull(transaction);
+        Assert.Equal(InventoryTransactionType.StockIn, transaction.TransactionType);
+        Assert.Equal(20, transaction.TotalUnitsChange);
+        Assert.Equal(0, transaction.TotalBefore);
+        Assert.Equal(0, transaction.ReservedBefore);
+        Assert.Equal(20, transaction.TotalAfter);
+        Assert.Equal(0, transaction.ReservedAfter);
+        Assert.Single(await _context.AuditLogs.Where(log => log.Action == "InventoryAdjusted").ToListAsync());
+    }
+
+    [Fact]
+    public async Task AdjustInventoryAsync_ThrowsWhenResultingNegativeUnits()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 5,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+        _context.SaveChanges();
+
+        var request = new InventoryAdjustmentRequest(BloodType.OPositive, -10, "Consumption");
+
+        // Act & Assert
+        await Assert.ThrowsAsync<InsufficientInventoryException>(() => _service.AdjustInventoryAsync(request));
+        Assert.Empty(_context.InventoryTransactions);
+    }
+
+    [Fact]
+    public async Task AdjustInventoryAsync_RejectsZeroAndBlankReasonWithoutTransaction()
+    {
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            _service.AdjustInventoryAsync(new InventoryAdjustmentRequest(BloodType.OPositive, 0, "Stock count")));
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            _service.AdjustInventoryAsync(new InventoryAdjustmentRequest(BloodType.OPositive, 4, " ")));
+
+        Assert.Empty(_context.BloodInventory);
+        Assert.Empty(_context.InventoryTransactions);
+    }
+
+    [Fact]
+    public async Task AdjustInventoryAsync_NegativeChangeForMissingTypeDoesNotCreateInventory()
+    {
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        await Assert.ThrowsAsync<InsufficientInventoryException>(() =>
+            _service.AdjustInventoryAsync(new InventoryAdjustmentRequest(BloodType.BPositive, -1, "Correction")));
+
+        Assert.Empty(_context.BloodInventory.Where(item => item.BloodType == BloodType.BPositive));
+        Assert.Empty(_context.InventoryTransactions);
+        Assert.Empty(_context.AuditLogs);
+    }
+
+    [Fact]
+    public async Task AdjustInventoryAsync_StaleRowVersionThrowsAndDoesNotCreateTransaction()
+    {
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+        _context.BloodInventory.Add(new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 10,
+            ReservedUnits = 2,
+            LowStockThreshold = 5,
+            RowVersion = [1, 2, 3],
+            UpdatedAtUtc = DateTime.UtcNow
+        });
+        await _context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<ConcurrencyException>(() =>
+            _service.AdjustInventoryAsync(new InventoryAdjustmentRequest(BloodType.OPositive, 2, "Stock count", [9, 9, 9])));
+
+        Assert.Empty(_context.InventoryTransactions);
+        Assert.Equal(10, _context.BloodInventory.Single().TotalUnits);
+    }
+
+    [Fact]
+    public async Task AdjustInventoryAsync_RejectsTotalBelowReservedUnits()
+    {
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+        _context.BloodInventory.Add(new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 10,
+            ReservedUnits = 6,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        });
+        await _context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<InsufficientInventoryException>(() =>
+            _service.AdjustInventoryAsync(new InventoryAdjustmentRequest(BloodType.OPositive, -5, "Consumption")));
+        Assert.Empty(_context.InventoryTransactions);
+    }
+
+    [Fact]
+    public async Task AdjustInventoryAsync_ThrowsWhenNotFacilityAdmin()
+    {
+        // Arrange
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(false);
+        var request = new InventoryAdjustmentRequest(BloodType.OPositive, 10, "Test");
+
+        // Act & Assert
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => _service.AdjustInventoryAsync(request));
+    }
+
+    [Theory]
+    [InlineData(FacilityStatus.Pending)]
+    [InlineData(FacilityStatus.Rejected)]
+    [InlineData(FacilityStatus.Suspended)]
+    public async Task AdjustInventoryAsync_ThrowsWhenFacilityNotApproved(FacilityStatus status)
+    {
+        var facility = new Facility
+        {
+            Id = _facilityId,
+            Name = "Blocked Facility",
+            Status = status,
+            CreatedByUserId = _userId,
+            CreatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.Facilities.Add(facility);
+        _context.SaveChanges();
+
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+        var request = new InventoryAdjustmentRequest(BloodType.OPositive, 10, "Test");
+
+        await Assert.ThrowsAsync<InvalidFacilityStatusException>(() => _service.AdjustInventoryAsync(request));
+        Assert.Empty(_context.BloodInventory);
+        Assert.Empty(_context.InventoryTransactions);
+    }
+
+    #endregion
+
+    #region GetTransactionHistoryAsync Tests
+
+    [Fact]
+    public async Task GetTransactionHistoryAsync_ReturnsTransactionsInDescendingOrder()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 50,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+        _context.SaveChanges();
+
+        var now = DateTime.UtcNow;
+        var transaction1 = new InventoryTransaction
+        {
+            Id = Guid.NewGuid(),
+            BloodInventoryId = inventory.Id,
+            TransactionType = InventoryTransactionType.StockIn,
+            TotalUnitsChange = 20,
+            ReservedUnitsChange = 0,
+            TotalAfter = 20,
+            ReservedAfter = 0,
+            Reason = "First transaction",
+            PerformedByUserId = _userId,
+            CreatedAtUtc = now.AddSeconds(-10)
+        };
+
+        var transaction2 = new InventoryTransaction
+        {
+            Id = Guid.NewGuid(),
+            BloodInventoryId = inventory.Id,
+            TransactionType = InventoryTransactionType.StockIn,
+            TotalUnitsChange = 30,
+            ReservedUnitsChange = 0,
+            TotalAfter = 50,
+            ReservedAfter = 0,
+            Reason = "Second transaction",
+            PerformedByUserId = _userId,
+            CreatedAtUtc = now
+        };
+
+        _context.InventoryTransactions.AddRange(transaction1, transaction2);
+        _context.SaveChanges();
+
+        // Act
+        var result = (await _service.GetTransactionHistoryAsync(new PageRequest())).Items;
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal(2, result.Count);
+        Assert.Equal(transaction2.Id, result[0].Id);
+        Assert.Equal("Second transaction", result[0].Reason);
+        Assert.Equal(50, result[0].TotalAfter);
+        Assert.Equal(0, result[0].ReservedAfter);
+        Assert.Equal("System", result[0].ActorDisplayName);
+    }
+
+    #endregion
+
+    #region GetLowStockAlertsAsync Tests
+
+    [Fact]
+    public async Task GetLowStockAlertsAsync_ReturnsBelowThresholdItems()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+
+        var inventory1 = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 5,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        var inventory2 = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.ABPositive,
+            TotalUnits = 50,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.AddRange(inventory1, inventory2);
+        _context.SaveChanges();
+
+        var request = new LowStockQueryRequest();
+
+        // Act
+        var result = await _service.GetLowStockAlertsAsync(request);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Single(result);
+        Assert.Equal(BloodType.OPositive, result[0].BloodType);
+        Assert.Equal(5, result[0].AvailableUnits);
+    }
+
+    #endregion
+
+    #region SearchAvailabilityAsync Tests
+
+    [Fact]
+    public async Task SearchAvailabilityAsync_ReturnsFacilitiesWithExactBloodType()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+        SeedApprovedFacility(_sourceFacilityId);
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 50,
+            ReservedUnits = 10,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+        _context.SaveChanges();
+
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        var request = new AvailabilitySearchRequest(BloodType.OPositive, 30);
+
+        // Act
+        var result = await _service.SearchAvailabilityAsync(request);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Single(result.Items);
+        Assert.Equal(_sourceFacilityId, result.Items[0].FacilityId);
+        Assert.Equal(40, result.Items[0].AvailableUnits);
+        Assert.Equal(BloodType.OPositive, result.Items[0].BloodType);
+        Assert.Equal("Test Region", result.Items[0].Region);
+        Assert.Equal("Test City", result.Items[0].City);
+        Assert.True(result.Items[0].UpdatedAtUtc > DateTime.MinValue);
+    }
+
+    [Fact]
+    public async Task SearchAvailabilityAsync_ExcludesRequestingFacility()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+
+        var ownInventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(ownInventory);
+        _context.SaveChanges();
+
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        var request = new AvailabilitySearchRequest(BloodType.OPositive, 50);
+
+        // Act
+        var result = await _service.SearchAvailabilityAsync(request);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Empty(result.Items); // Own facility excluded
+    }
+
+    [Fact]
+    public async Task SearchAvailabilityAsync_ExcludesPendingFacilities()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+
+        var pendingFacility = new Facility
+        {
+            Id = _sourceFacilityId,
+            Name = "Pending Facility",
+            Status = FacilityStatus.Pending,
+            CreatedByUserId = _userId,
+            CreatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.Facilities.Add(pendingFacility);
+        _context.SaveChanges();
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+        _context.SaveChanges();
+
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        var request = new AvailabilitySearchRequest(BloodType.OPositive, 50);
+
+        // Act
+        var result = await _service.SearchAvailabilityAsync(request);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Empty(result.Items); // Pending facility excluded
+    }
+
+    [Fact]
+    public async Task SearchAvailabilityAsync_RespectMinimumAvailableUnits()
+    {
+        // Arrange
+        SeedApprovedFacility(_facilityId);
+        SeedApprovedFacility(_sourceFacilityId);
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 80, // Only 20 available
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+        _context.SaveChanges();
+
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        var request = new AvailabilitySearchRequest(BloodType.OPositive, 30);
+
+        // Act
+        var result = await _service.SearchAvailabilityAsync(request);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Empty(result.Items); // Not enough available units
+    }
+
+    [Fact]
+    public async Task SearchAvailabilityAsync_RequiresApprovedFacilityAdmin()
+    {
+        SeedApprovedFacility(_facilityId);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(false);
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(true);
+
+        var request = new AvailabilitySearchRequest(BloodType.OPositive, 1);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => _service.SearchAvailabilityAsync(request));
+    }
+
+    [Fact]
+    public async Task SearchAvailabilityAsync_ExcludesSuspendedFacilitiesAndZeroAvailability()
+    {
+        SeedApprovedFacility(_facilityId);
+        SeedApprovedFacility(_sourceFacilityId);
+        var suspendedFacilityId = Guid.NewGuid();
+        _context.Facilities.Add(new Facility
+        {
+            Id = suspendedFacilityId,
+            Name = "Suspended Facility",
+            Status = FacilityStatus.Suspended,
+            CreatedByUserId = _userId,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+        _context.BloodInventory.AddRange(
+            new BloodInventory
+            {
+                Id = Guid.NewGuid(),
+                FacilityId = _sourceFacilityId,
+                BloodType = BloodType.OPositive,
+                TotalUnits = 6,
+                ReservedUnits = 6,
+                LowStockThreshold = 10,
+                UpdatedAtUtc = DateTime.UtcNow
+            },
+            new BloodInventory
+            {
+                Id = Guid.NewGuid(),
+                FacilityId = suspendedFacilityId,
+                BloodType = BloodType.OPositive,
+                TotalUnits = 20,
+                ReservedUnits = 0,
+                LowStockThreshold = 10,
+                UpdatedAtUtc = DateTime.UtcNow
+            });
+        await _context.SaveChangesAsync();
+        _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(true);
+
+        var result = await _service.SearchAvailabilityAsync(new AvailabilitySearchRequest(BloodType.OPositive, 0));
+
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task SearchAvailabilityAsync_PaginatesAndSourceRecheckIsIndependentOfCurrentPage()
+    {
+        SeedApprovedFacility(_facilityId);
+        var sourceIds = Enumerable.Range(0, 26).Select(_ => Guid.NewGuid()).ToArray();
+        for (var index = 0; index < sourceIds.Length; index++)
+        {
+            var id = sourceIds[index];
+            _context.Facilities.Add(new Facility
+            {
+                Id = id,
+                Name = $"Source {index:D2}",
+                RegistrationNumber = $"SRC-{index:D2}",
+                Status = FacilityStatus.Approved,
+                CreatedByUserId = _userId,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+            _context.BloodInventory.Add(new BloodInventory
+            {
+                Id = Guid.NewGuid(),
+                FacilityId = id,
+                BloodType = BloodType.OPositive,
+                TotalUnits = 12,
+                ReservedUnits = 2,
+                LowStockThreshold = 1,
+                UpdatedAtUtc = DateTime.UtcNow
+            });
+        }
+        await _context.SaveChangesAsync();
+        _mockCurrentUserService.Setup(service => service.IsInRole("FacilityAdmin")).Returns(true);
+
+        var request = new AvailabilitySearchRequest(BloodType.OPositive, 8);
+        var first = await _service.SearchAvailabilityAsync(request, new PageRequest(1));
+        var second = await _service.SearchAvailabilityAsync(request, new PageRequest(2));
+
+        Assert.Equal(25, first.Items.Count);
+        Assert.True(first.HasNext);
+        Assert.Single(second.Items);
+        Assert.False(second.HasNext);
+        Assert.DoesNotContain(sourceIds[^1], first.Items.Select(item => item.FacilityId));
+        Assert.Equal(sourceIds[^1], Assert.Single(second.Items).FacilityId);
+        Assert.True(await _service.IsSourceAvailableAsync(sourceIds[^1], request));
+        Assert.False(await _service.IsSourceAvailableAsync(sourceIds[^1], request with { BloodType = BloodType.APositive }));
+        Assert.False(await _service.IsSourceAvailableAsync(_facilityId, request));
+    }
+
+    #endregion
+
+    #region ReserveForRequestAsync Tests
+
+    [Fact]
+    public async Task ReserveForRequestAsync_AtomicallyIncreasesReservedUnits()
+    {
+        // Arrange
+        SeedApprovedFacility(_sourceFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_sourceFacilityId);
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 20,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 30,
+            Status = BloodRequestStatus.Sent,
+            RequestedByAdminId = "admin-123",
+            CreatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodRequests.Add(request);
+        _context.SaveChanges();
+
+        // Act
+        await _service.ReserveForRequestAsync(request.Id, request.UnitsRequested);
+
+        // Assert
+        var updatedInventory = await _context.BloodInventory.FirstOrDefaultAsync(bi => bi.Id == inventory.Id);
+        Assert.NotNull(updatedInventory);
+        Assert.Equal(50, updatedInventory.ReservedUnits);
+
+        var transaction = await _context.InventoryTransactions
+            .FirstOrDefaultAsync(t => t.BloodInventoryId == inventory.Id && t.TransactionType == InventoryTransactionType.Reserve);
+
+        Assert.NotNull(transaction);
+        Assert.Equal(30, transaction.ReservedUnitsChange);
+    }
+
+    [Fact]
+    public async Task ReserveForRequestAsync_ThrowsWhenInsufficientAvailableUnits()
+    {
+        // Arrange
+        SeedApprovedFacility(_sourceFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_sourceFacilityId);
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 80, // Only 20 available
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 30,
+            Status = BloodRequestStatus.Sent,
+            RequestedByAdminId = "admin-123",
+            CreatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodRequests.Add(request);
+        _context.SaveChanges();
+
+        // Act & Assert
+        await Assert.ThrowsAsync<InsufficientInventoryException>(() => _service.ReserveForRequestAsync(request.Id, request.UnitsRequested));
+    }
+
+    [Fact]
+    public async Task ReserveForRequestAsync_ThrowsWhenRequestNotFound()
+    {
+        // Act & Assert
+        await Assert.ThrowsAsync<EntityNotFoundException>(() => _service.ReserveForRequestAsync(Guid.NewGuid(), 1));
+    }
+
+    [Theory]
+    [InlineData("requester-admin")]
+    [InlineData("staff")]
+    [InlineData("system-admin")]
+    [InlineData("inactive-admin")]
+    public async Task ReserveForRequestAsync_RejectsUnauthorizedActorWithoutMutation(string actor)
+    {
+        SeedApprovedFacility(_sourceFacilityId);
+        SeedApprovedFacility(_requestingFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(
+            actor == "requester-admin" ? _requestingFacilityId : _sourceFacilityId);
+        if (actor == "requester-admin")
+        {
+            _mockCurrentUserService.Setup(s => s.IsInRole("SystemAdmin")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(false);
+        }
+        else if (actor == "staff")
+        {
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("SystemAdmin")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(true);
+        }
+        else if (actor == "system-admin")
+        {
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("SystemAdmin")).Returns(true);
+        }
+        else
+        {
+            _mockCurrentUserService.Setup(s => s.IsInRole("SystemAdmin")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(false);
+        }
+        if (actor == "inactive-admin")
+        {
+            _mockCurrentUserService.Setup(s => s.IsActive).Returns(false);
+        }
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 20,
+            ReservedUnits = 3,
+            LowStockThreshold = 1,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 5,
+            Status = BloodRequestStatus.Sent,
+            RequestedByAdminId = "requester-admin",
+            CreatedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodInventory.Add(inventory);
+        _context.BloodRequests.Add(request);
+        await _context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(
+            () => _service.ReserveForRequestAsync(request.Id, 5));
+
+        Assert.Equal(3, (await _context.BloodInventory.SingleAsync()).ReservedUnits);
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(FacilityStatus.Pending)]
+    [InlineData(FacilityStatus.Rejected)]
+    [InlineData(FacilityStatus.Suspended)]
+    public async Task ReserveForRequestAsync_RejectsBlockedSourceWithoutMutation(FacilityStatus status)
+    {
+        _context.Facilities.Add(new Facility
+        {
+            Id = _sourceFacilityId,
+            Name = "Blocked source",
+            Status = status,
+            CreatedByUserId = _userId,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+        SeedApprovedFacility(_requestingFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_sourceFacilityId);
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 20,
+            ReservedUnits = 3,
+            LowStockThreshold = 1,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 5,
+            Status = BloodRequestStatus.Sent,
+            RequestedByAdminId = "requester-admin",
+            CreatedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodInventory.Add(inventory);
+        _context.BloodRequests.Add(request);
+        await _context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<InvalidFacilityStatusException>(
+            () => _service.ReserveForRequestAsync(request.Id, 5));
+
+        Assert.Equal(3, (await _context.BloodInventory.SingleAsync()).ReservedUnits);
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    [Fact]
+    public async Task ConsumeForNeedAsync_ConsumesExactUnitsForOwnNeed()
+    {
+        SeedApprovedFacility(_facilityId);
+        var need = AddNeed(_facilityId, BloodNeedStatus.PendingReview, BloodType.OPositive, 4);
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 20,
+            ReservedUnits = 5,
+            LowStockThreshold = 1,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodInventory.Add(inventory);
+        await _context.SaveChangesAsync();
+
+        await _service.ConsumeForNeedAsync(need.Id, BloodType.OPositive, 4, "Internal need fulfilment");
+
+        Assert.Equal((16, 5), (inventory.TotalUnits, inventory.ReservedUnits));
+        var transaction = Assert.Single(await _context.InventoryTransactions.ToListAsync());
+        Assert.Equal(InventoryTransactionType.Consumption, transaction.TransactionType);
+        Assert.Equal((-4, 0), (transaction.TotalUnitsChange, transaction.ReservedUnitsChange));
+        Assert.Equal(need.Id, transaction.ReferenceId);
+    }
+
+    [Theory]
+    [InlineData("unrelated-admin")]
+    [InlineData("staff")]
+    [InlineData("system-admin")]
+    [InlineData("inactive-admin")]
+    public async Task ConsumeForNeedAsync_RejectsUnauthorizedActorWithoutMutation(string actor)
+    {
+        SeedApprovedFacility(_facilityId);
+        SeedApprovedFacility(_sourceFacilityId);
+        var need = AddNeed(_facilityId, BloodNeedStatus.PendingReview, BloodType.OPositive, 4);
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 20,
+            ReservedUnits = 5,
+            LowStockThreshold = 1,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodInventory.Add(inventory);
+        await _context.SaveChangesAsync();
+
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(
+            actor == "unrelated-admin" ? _sourceFacilityId : _facilityId);
+        if (actor is "staff" or "system-admin")
+        {
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityAdmin")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(actor == "staff");
+            _mockCurrentUserService.Setup(s => s.IsInRole("SystemAdmin")).Returns(actor == "system-admin");
+        }
+        else
+        {
+            _mockCurrentUserService.Setup(s => s.IsInRole("FacilityStaff")).Returns(false);
+            _mockCurrentUserService.Setup(s => s.IsInRole("SystemAdmin")).Returns(false);
+        }
+        if (actor == "inactive-admin")
+        {
+            _mockCurrentUserService.Setup(s => s.IsActive).Returns(false);
+        }
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            _service.ConsumeForNeedAsync(need.Id, BloodType.OPositive, 4, "Internal need fulfilment"));
+
+        Assert.Equal((20, 5), (inventory.TotalUnits, inventory.ReservedUnits));
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(FacilityStatus.Pending)]
+    [InlineData(FacilityStatus.Rejected)]
+    [InlineData(FacilityStatus.Suspended)]
+    public async Task ConsumeForNeedAsync_RejectsBlockedFacilityWithoutMutation(FacilityStatus status)
+    {
+        _context.Facilities.Add(new Facility
+        {
+            Id = _facilityId,
+            Name = "Blocked facility",
+            Status = status,
+            CreatedByUserId = _userId,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+        var need = AddNeed(_facilityId, BloodNeedStatus.PendingReview, BloodType.OPositive, 4);
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _facilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 20,
+            ReservedUnits = 5,
+            LowStockThreshold = 1,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodInventory.Add(inventory);
+        await _context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<InvalidFacilityStatusException>(() =>
+            _service.ConsumeForNeedAsync(need.Id, BloodType.OPositive, 4, "Internal need fulfilment"));
+
+        Assert.Equal((20, 5), (inventory.TotalUnits, inventory.ReservedUnits));
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    #endregion
+
+    #region ReleaseReservationAsync Tests
+
+    [Fact]
+    public async Task ReleaseReservationAsync_AtomicallyDecreasesReservedUnits()
+    {
+        // Arrange
+        SeedApprovedFacility(_sourceFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_sourceFacilityId);
+        SeedApprovedFacility(_requestingFacilityId);
+
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 30,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(inventory);
+
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 30,
+            UnitsAccepted = 30,
+            Status = BloodRequestStatus.Accepted,
+            RequestedByAdminId = "admin-123",
+            RespondedByAdminId = "admin-456",
+            CreatedAtUtc = DateTime.UtcNow,
+            RespondedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodRequests.Add(request);
+        _context.SaveChanges();
+
+        // Act
+        await _service.ReleaseReservationAsync(request.Id);
+
+        // Assert
+        var updatedInventory = await _context.BloodInventory.FirstOrDefaultAsync(bi => bi.Id == inventory.Id);
+        Assert.NotNull(updatedInventory);
+        Assert.Equal(0, updatedInventory.ReservedUnits);
+
+        var transaction = await _context.InventoryTransactions
+            .FirstOrDefaultAsync(t => t.BloodInventoryId == inventory.Id && t.TransactionType == InventoryTransactionType.Release);
+
+        Assert.NotNull(transaction);
+        Assert.Equal(-30, transaction.ReservedUnitsChange);
+        Assert.Equal((100, 30, 100, 0), (transaction.TotalBefore, transaction.ReservedBefore, transaction.TotalAfter, transaction.ReservedAfter));
+    }
+
+    [Fact]
+    public async Task ReleaseReservationAsync_RequestingFacilityCannotReleaseReservation()
+    {
+        SeedApprovedFacility(_sourceFacilityId);
+        SeedApprovedFacility(_requestingFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_requestingFacilityId);
+        var inventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 20,
+            ReservedUnits = 5,
+            LowStockThreshold = 1,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 5,
+            UnitsAccepted = 5,
+            Status = BloodRequestStatus.Accepted,
+            RequestedByAdminId = "admin-123",
+            CreatedAtUtc = DateTime.UtcNow
+        };
+        _context.BloodInventory.Add(inventory);
+        _context.BloodRequests.Add(request);
+        await _context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<EntityNotFoundException>(() => _service.ReleaseReservationAsync(request.Id));
+
+        Assert.Equal(5, (await _context.BloodInventory.SingleAsync()).ReservedUnits);
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData("requester-admin")]
+    [InlineData("staff")]
+    [InlineData("system-admin")]
+    [InlineData("inactive-admin")]
+    public async Task ReleaseReservationAsync_RejectsInvalidActorWithoutMutation(string actor)
+    {
+        var request = AddAcceptedRequest();
+        SetMutationActor(actor);
+
+        if (actor == "requester-admin")
+        {
+            await Assert.ThrowsAsync<EntityNotFoundException>(() => _service.ReleaseReservationAsync(request.Id));
+        }
+        else
+        {
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => _service.ReleaseReservationAsync(request.Id));
+        }
+
+        Assert.Equal(5, (await _context.BloodInventory.SingleAsync()).ReservedUnits);
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(FacilityStatus.Pending)]
+    [InlineData(FacilityStatus.Rejected)]
+    [InlineData(FacilityStatus.Suspended)]
+    public async Task ReleaseReservationAsync_RejectsBlockedSourceWithoutMutation(FacilityStatus sourceStatus)
+    {
+        var request = AddAcceptedRequest(sourceStatus);
+        SetMutationActor("source-admin");
+
+        await Assert.ThrowsAsync<InvalidFacilityStatusException>(() => _service.ReleaseReservationAsync(request.Id));
+
+        Assert.Equal(5, (await _context.BloodInventory.SingleAsync()).ReservedUnits);
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    #endregion
+
+    #region FulfilTransferAsync Tests
+
+    [Fact]
+    public async Task FulfilTransferAsync_AtomicallyTransfersStockBothFacilities()
+    {
+        // Arrange
+        SeedApprovedFacility(_sourceFacilityId);
+        SeedApprovedFacility(_requestingFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_sourceFacilityId);
+
+        var sourceInventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 30,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        var requestingInventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _requestingFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 50,
+            ReservedUnits = 0,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.AddRange(sourceInventory, requestingInventory);
+
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 30,
+            UnitsAccepted = 30,
+            Status = BloodRequestStatus.Accepted,
+            RequestedByAdminId = "admin-123",
+            RespondedByAdminId = "admin-456",
+            CreatedAtUtc = DateTime.UtcNow,
+            RespondedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodRequests.Add(request);
+        _context.SaveChanges();
+
+        // Act
+        await _service.FulfilTransferAsync(request.Id);
+
+        // Assert
+        var updatedSourceInventory = await _context.BloodInventory.FirstOrDefaultAsync(bi => bi.Id == sourceInventory.Id);
+        Assert.NotNull(updatedSourceInventory);
+        Assert.Equal(70, updatedSourceInventory.TotalUnits);
+        Assert.Equal(0, updatedSourceInventory.ReservedUnits);
+
+        var updatedRequestingInventory = await _context.BloodInventory.FirstOrDefaultAsync(bi => bi.Id == requestingInventory.Id);
+        Assert.NotNull(updatedRequestingInventory);
+        Assert.Equal(80, updatedRequestingInventory.TotalUnits);
+
+        var transactions = await _context.InventoryTransactions
+            .Where(t => t.ReferenceId == request.Id)
+            .ToListAsync();
+
+        Assert.Equal(2, transactions.Count);
+        Assert.Single(transactions, t => t.TransactionType == InventoryTransactionType.TransferOut);
+        Assert.Single(transactions, t => t.TransactionType == InventoryTransactionType.TransferIn);
+    }
+
+    [Fact]
+    public async Task FulfilTransferAsync_CreatesInventoryIfNotExistsForRequesting()
+    {
+        // Arrange
+        SeedApprovedFacility(_sourceFacilityId);
+        SeedApprovedFacility(_requestingFacilityId);
+        _mockCurrentUserService.Setup(s => s.FacilityId).Returns(_sourceFacilityId);
+
+        var sourceInventory = new BloodInventory
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            TotalUnits = 100,
+            ReservedUnits = 30,
+            LowStockThreshold = 10,
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodInventory.Add(sourceInventory);
+
+        var request = new BloodRequest
+        {
+            Id = Guid.NewGuid(),
+            BloodNeedId = Guid.NewGuid(),
+            RequestingFacilityId = _requestingFacilityId,
+            SourceFacilityId = _sourceFacilityId,
+            BloodType = BloodType.OPositive,
+            UnitsRequested = 30,
+            UnitsAccepted = 30,
+            Status = BloodRequestStatus.Accepted,
+            RequestedByAdminId = "admin-123",
+            RespondedByAdminId = "admin-456",
+            CreatedAtUtc = DateTime.UtcNow,
+            RespondedAtUtc = DateTime.UtcNow
+        };
+
+        _context.BloodRequests.Add(request);
+        _context.SaveChanges();
+
+        // Act
+        await _service.FulfilTransferAsync(request.Id);
+
+        // Assert
+        var newInventory = await _context.BloodInventory
+            .FirstOrDefaultAsync(bi => bi.FacilityId == _requestingFacilityId && bi.BloodType == BloodType.OPositive);
+
+        Assert.NotNull(newInventory);
+        Assert.Equal(30, newInventory.TotalUnits);
+    }
+
+    [Theory]
+    [InlineData("requester-admin")]
+    [InlineData("staff")]
+    [InlineData("system-admin")]
+    [InlineData("inactive-admin")]
+    public async Task FulfilTransferAsync_RejectsInvalidActorWithoutMutation(string actor)
+    {
+        var request = AddAcceptedRequest();
+        SetMutationActor(actor);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => _service.FulfilTransferAsync(request.Id));
+
+        var inventory = await _context.BloodInventory.SingleAsync();
+        Assert.Equal((20, 5), (inventory.TotalUnits, inventory.ReservedUnits));
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(FacilityStatus.Pending)]
+    [InlineData(FacilityStatus.Rejected)]
+    [InlineData(FacilityStatus.Suspended)]
+    public async Task FulfilTransferAsync_RejectsBlockedSourceWithoutMutation(FacilityStatus sourceStatus)
+    {
+        var request = AddAcceptedRequest(sourceStatus);
+        SetMutationActor("source-admin");
+
+        await Assert.ThrowsAsync<InvalidFacilityStatusException>(() => _service.FulfilTransferAsync(request.Id));
+
+        var inventory = await _context.BloodInventory.SingleAsync();
+        Assert.Equal((20, 5), (inventory.TotalUnits, inventory.ReservedUnits));
+        Assert.Empty(await _context.InventoryTransactions.ToListAsync());
+    }
+
+    #endregion
+}

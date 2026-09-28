@@ -1,0 +1,40 @@
+bin/
+obj/
+.vs/
+.vscode/
+TestResults/
+coverage/
+*.user
+*.suo
+*.rsuser
+*.nupkg
+*.snupkg
+
+# Secrets and local-only configuration
+secrets.json
+*.secret.json
+*.secrets.json
+appsettings.Local.json
+appsettings.Production.json
+appsettings.Development.json
+launchSettings.json
+!src/BloodLink.Api/appsettings.Development.json
+!src/BloodLink.Api/Properties/launchSettings.json
+*.pfx
+*.pem
+*.key
+*.crt
+.env
+.env.*
+
+# Local database files
+*.db
+
+# Build and publish output
+artifacts/
+publish/
+*.log
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
