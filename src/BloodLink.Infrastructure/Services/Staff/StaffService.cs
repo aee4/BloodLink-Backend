@@ -4,6 +4,7 @@ using BloodLink.Application.DTOs;
 using BloodLink.Application.Interfaces;
 using BloodLink.Domain.Entities;
 using BloodLink.Domain.Enums;
+using PrivateResourceNotFoundException = BloodLink.Domain.Exceptions.PrivateResourceNotFoundException;
 using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Identity;
 using BloodLink.Infrastructure.Services.Common;
@@ -165,14 +166,14 @@ public sealed class StaffService(
         var staff = await dbContext.FacilityStaff.SingleOrDefaultAsync(
                 item => item.UserId == userId && item.FacilityId == facilityId,
                 cancellationToken)
-            ?? throw new InvalidOperationException("The staff member was not found.");
+            ?? throw new PrivateResourceNotFoundException();
 
         var user = await dbContext.Users.SingleOrDefaultAsync(item => item.Id == userId, cancellationToken)
-            ?? throw new InvalidOperationException("The staff user was not found.");
+            ?? throw new PrivateResourceNotFoundException();
 
         if (user.FacilityId != facilityId)
         {
-            throw new UnauthorizedAccessException("You are not authorized to manage this staff member.");
+            throw new PrivateResourceNotFoundException();
         }
 
         return (staff, user);

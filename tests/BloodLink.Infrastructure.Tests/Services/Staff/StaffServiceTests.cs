@@ -131,7 +131,7 @@ public sealed class StaffServiceTests
         var staffB = await serviceB.CreateStaffAsync(CreateRequest(email: "b@example.test"));
         var serviceA = CreateService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<BloodLink.Domain.Exceptions.PrivateResourceNotFoundException>(() =>
             serviceA.DeactivateStaffAsync(new ChangeStaffStatusRequest(staffB.UserId, "Wrong facility")));
     }
 

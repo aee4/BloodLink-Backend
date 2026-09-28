@@ -211,6 +211,32 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
     }
 
     [Fact]
+    public async Task Staff_status_action_hides_foreign_target_and_performs_no_writes()
+    {
+        var (otherFacilityId, otherAdminEmail) = await fixture.CreateAdditionalApprovedFacilityAdminAsync();
+        Assert.NotEqual(fixture.FacilityId, otherFacilityId);
+        using var unrelatedClient = await fixture.AuthenticatedClientAsync(otherAdminEmail);
+        await using var db = fixture.CreateContext();
+        var staffBefore = await db.FacilityStaff.SingleAsync(item => item.UserId == fixture.StaffUserId);
+        var auditCountBefore = await db.AuditLogs.CountAsync();
+        var notificationCountBefore = await db.Notifications.CountAsync();
+
+        using var response = await unrelatedClient.PostAsJsonAsync(
+            $"/api/v1/staff/{fixture.StaffUserId}/deactivate", new { reason = "Private target probe" });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(fixture.StaffUserId, body, StringComparison.OrdinalIgnoreCase);
+        using var problem = JsonDocument.Parse(body);
+        Assert.Equal("resource_not_found", problem.RootElement.GetProperty("code").GetString());
+        Assert.Equal("The requested resource was not found.", problem.RootElement.GetProperty("detail").GetString());
+        Assert.Equal(StaffStatus.Active, staffBefore.Status);
+        Assert.True((await db.Users.SingleAsync(user => user.Id == fixture.StaffUserId)).IsActive);
+        Assert.Equal(auditCountBefore, await db.AuditLogs.CountAsync());
+        Assert.Equal(notificationCountBefore, await db.Notifications.CountAsync());
+    }
+
+    [Fact]
     public async Task Development_registration_is_auto_approved_and_persisted()
     {
         using var client = fixture.Application.CreateClient();
@@ -396,7 +422,7 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
         db.Facilities.Add(new Facility
         {
             Id = facilityId,
-            Name = "API Private Record Facility",
+            Name = $"API Private Record Facility {Guid.NewGuid():N}",
             FacilityType = FacilityType.Hospital,
             RegistrationNumber = $"PRIVATE-{Guid.NewGuid():N}",
             Region = "Greater Accra",
