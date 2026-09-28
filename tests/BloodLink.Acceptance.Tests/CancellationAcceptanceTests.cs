@@ -42,7 +42,7 @@ public sealed class CancellationAcceptanceTests
         Assert.Equal(1, inventory.ReserveCalls);
         Assert.Equal(0, inventory.ReleaseCalls);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => requestServiceAsRequester.CancelAsync(request.Id));
+        await Assert.ThrowsAsync<BloodLink.Domain.Exceptions.PrivateResourceNotFoundException>(() => requestServiceAsRequester.CancelAsync(request.Id));
         await requestServiceAsSource.CancelAsync(request.Id);
 
         Assert.Equal(1, inventory.ReleaseCalls);

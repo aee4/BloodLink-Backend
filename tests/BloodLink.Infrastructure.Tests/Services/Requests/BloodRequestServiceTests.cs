@@ -1,6 +1,7 @@
 using BloodLink.Application.Contracts;
 using BloodLink.Application.DTOs;
 using BloodLink.Domain.Enums;
+using PrivateResourceNotFoundException = BloodLink.Domain.Exceptions.PrivateResourceNotFoundException;
 using BloodLink.Infrastructure.Services.Requests;
 using Microsoft.EntityFrameworkCore;
 
@@ -89,7 +90,7 @@ public sealed class BloodRequestServiceTests
         var pendingNeed = WorkflowTestSupport.AddNeed(dbContext, WorkflowTestSupport.FacilityAId, "staff-a", BloodNeedStatus.PendingReview);
         var service = CreateService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId));
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             service.CreateFromNeedAsync(new CreateBloodRequestRequest(otherNeed.Id, WorkflowTestSupport.FacilityBId, 1, null)));
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             service.CreateFromNeedAsync(new CreateBloodRequestRequest(pendingNeed.Id, WorkflowTestSupport.FacilityBId, 1, null)));
@@ -144,7 +145,7 @@ public sealed class BloodRequestServiceTests
         Assert.NotNull(viewable);
 
         var unrelated = WorkflowTestSupport.AddRequest(dbContext, needB.Id, WorkflowTestSupport.FacilityBId, WorkflowTestSupport.FacilityCId);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAsync(unrelated.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => service.GetAsync(unrelated.Id));
     }
 
     [Fact]
@@ -178,7 +179,7 @@ public sealed class BloodRequestServiceTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.AcceptAsync(new RequestResponseRequest(accepted.Id, 1, null)));
         await Assert.ThrowsAsync<ArgumentException>(() => service.AcceptAsync(new RequestResponseRequest(sent.Id, 3, null)));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             CreateService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId)).AcceptAsync(new RequestResponseRequest(sent.Id, 1, null)));
     }
 
@@ -257,12 +258,24 @@ public sealed class BloodRequestServiceTests
         foreach (var actor in invalidActors)
         {
             var service = CreateService(dbContext, actor, inventory);
-            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-                service.AcceptAsync(new RequestResponseRequest(sentForAccept.Id, 1, "Accept")));
-            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-                service.RejectAsync(new RequestResponseRequest(sentForReject.Id, null, "Unavailable")));
-            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-                service.FulfilAsync(new FulfilRequestRequest(acceptedForFulfil.Id, "Handed over")));
+            if (ReferenceEquals(actor, unrelatedAdmin))
+            {
+                await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
+                    service.AcceptAsync(new RequestResponseRequest(sentForAccept.Id, 1, "Accept")));
+                await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
+                    service.RejectAsync(new RequestResponseRequest(sentForReject.Id, null, "Unavailable")));
+                await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
+                    service.FulfilAsync(new FulfilRequestRequest(acceptedForFulfil.Id, "Handed over")));
+            }
+            else
+            {
+                await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                    service.AcceptAsync(new RequestResponseRequest(sentForAccept.Id, 1, "Accept")));
+                await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                    service.RejectAsync(new RequestResponseRequest(sentForReject.Id, null, "Unavailable")));
+                await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                    service.FulfilAsync(new FulfilRequestRequest(acceptedForFulfil.Id, "Handed over")));
+            }
         }
 
         Assert.Equal(BloodRequestStatus.Sent, sentForAccept.Status);
@@ -341,7 +354,7 @@ public sealed class BloodRequestServiceTests
         var bloodRequest = WorkflowTestSupport.AddRequest(dbContext, need.Id, WorkflowTestSupport.FacilityAId, WorkflowTestSupport.FacilityBId);
         var service = CreateService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId));
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             service.RejectAsync(new RequestResponseRequest(bloodRequest.Id, null, "Unavailable")));
     }
 
@@ -360,7 +373,7 @@ public sealed class BloodRequestServiceTests
         var requester = CreateService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId), inventory);
         var service = CreateService(dbContext, AdminUser("admin-b", WorkflowTestSupport.FacilityBId), inventory);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => requester.CancelAsync(sent.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => requester.CancelAsync(sent.Id));
         await service.CancelAsync(sent.Id);
         await service.CancelAsync(accepted.Id);
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.CancelAsync(accepted.Id));
@@ -398,8 +411,8 @@ public sealed class BloodRequestServiceTests
         var unauthenticatedSource = AdminUser("admin-b", WorkflowTestSupport.FacilityBId);
         unauthenticatedSource.IsAuthenticated = false;
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => requester.CancelAsync(request.Id));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => unrelatedAdmin.CancelAsync(request.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => requester.CancelAsync(request.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => unrelatedAdmin.CancelAsync(request.Id));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => staff.CancelAsync(request.Id));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => CreateService(dbContext, systemAdmin).CancelAsync(request.Id));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => CreateService(dbContext, inactiveSource).CancelAsync(request.Id));
@@ -551,7 +564,7 @@ public sealed class BloodRequestServiceTests
         var bloodRequest = WorkflowTestSupport.AddRequest(dbContext, need.Id, WorkflowTestSupport.FacilityAId, WorkflowTestSupport.FacilityBId, BloodRequestStatus.Accepted, unitsAccepted: 2);
         var service = CreateService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId));
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             service.FulfilAsync(new FulfilRequestRequest(bloodRequest.Id, null)));
     }
 
@@ -571,7 +584,7 @@ public sealed class BloodRequestServiceTests
             sourceService.AcceptAsync(new RequestResponseRequest(bloodRequest.Id, 1, null)));
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             sourceService.RejectAsync(new RequestResponseRequest(bloodRequest.Id, null, "Unavailable")));
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             requesterService.CancelAsync(bloodRequest.Id));
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             sourceService.FulfilAsync(new FulfilRequestRequest(bloodRequest.Id, null)));

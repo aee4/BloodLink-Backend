@@ -5,6 +5,7 @@ using BloodLink.Application.DTOs;
 using BloodLink.Application.Interfaces;
 using BloodLink.Domain.Entities;
 using BloodLink.Domain.Enums;
+using PrivateResourceNotFoundException = BloodLink.Domain.Exceptions.PrivateResourceNotFoundException;
 using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Identity;
 using BloodLink.Infrastructure.Services.Dashboard;
@@ -1190,7 +1191,7 @@ public sealed class RelationalNeedFulfilmentTests
         var sourceService = new BloodRequestService(db, source, new InventoryService(db, source));
         await sourceService.AcceptAsync(new RequestResponseRequest(request.Id, 6, "Partial supply."));
         Assert.Equal(6, (await db.BloodInventory.SingleAsync(item => item.Id == database.SourceInventoryId)).ReservedUnits);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => requests.CancelAsync(request.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => requests.CancelAsync(request.Id));
         await sourceService.CancelAsync(request.Id);
         await Assert.ThrowsAsync<InvalidOperationException>(() => sourceService.CancelAsync(request.Id));
 
@@ -1226,9 +1227,9 @@ public sealed class RelationalNeedFulfilmentTests
         var sourceService = new BloodRequestService(db, source, new InventoryService(db, source));
         var sent = await requesterService.CreateFromNeedAsync(new CreateBloodRequestRequest(database.NeedId, FacilityBId, 5, null));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => requesterService.CancelAsync(sent.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => requesterService.CancelAsync(sent.Id));
         await sourceService.AcceptAsync(new RequestResponseRequest(sent.Id, 3, null));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => requesterService.CancelAsync(sent.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => requesterService.CancelAsync(sent.Id));
 
         var request = await db.BloodRequests.SingleAsync(item => item.Id == sent.Id);
         Assert.Equal(BloodRequestStatus.Accepted, request.Status);

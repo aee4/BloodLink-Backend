@@ -3,6 +3,7 @@ using BloodLink.Application.DTOs;
 using BloodLink.Application.Interfaces;
 using BloodLink.Domain.Entities;
 using BloodLink.Domain.Enums;
+using BloodLink.Domain.Exceptions;
 using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Services.Common;
 using Microsoft.EntityFrameworkCore;
@@ -38,11 +39,11 @@ public sealed class BloodRequestService(
 
         var need = await dbContext.BloodNeeds
             .SingleOrDefaultAsync(item => item.Id == request.BloodNeedId, cancellationToken)
-            ?? throw new InvalidOperationException("The blood need was not found.");
+            ?? throw new PrivateResourceNotFoundException();
 
         if (need.FacilityId != requestingFacilityId)
         {
-            throw new UnauthorizedAccessException("You may create requests only for your own facility's needs.");
+            throw new PrivateResourceNotFoundException();
         }
 
         if (need.Status != BloodNeedStatus.Searching)
@@ -148,7 +149,7 @@ public sealed class BloodRequestService(
 
         if (bloodRequest.RequestingFacilityId != facilityId && bloodRequest.SourceFacilityId != facilityId)
         {
-            throw new UnauthorizedAccessException("You are not authorized to view this request.");
+            throw new PrivateResourceNotFoundException();
         }
 
         return await ProjectRequest(bloodRequestId, cancellationToken);
@@ -250,7 +251,7 @@ public sealed class BloodRequestService(
             var bloodRequest = await dbContext.BloodRequests.SingleOrDefaultAsync(
                     item => item.Id == bloodRequestId && item.SourceFacilityId == facilityId,
                     cancellationToken)
-                ?? throw new InvalidOperationException("The blood request was not found.");
+                ?? throw new PrivateResourceNotFoundException();
 
             var previousStatus = bloodRequest.Status;
             if (previousStatus == BloodRequestStatus.Accepted)
@@ -394,11 +395,11 @@ public sealed class BloodRequestService(
 
         var bloodRequest = await dbContext.BloodRequests
             .SingleOrDefaultAsync(item => item.Id == bloodRequestId, cancellationToken)
-            ?? throw new InvalidOperationException("The blood request was not found.");
+            ?? throw new PrivateResourceNotFoundException();
 
         if (bloodRequest.SourceFacilityId != facilityId)
         {
-            throw new UnauthorizedAccessException("Only the source facility admin may perform this action.");
+            throw new PrivateResourceNotFoundException();
         }
 
         return bloodRequest;

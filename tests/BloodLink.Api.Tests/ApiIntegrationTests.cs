@@ -160,6 +160,57 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
     }
 
     [Fact]
+    public async Task Need_detail_hides_foreign_records_with_the_same_private_404_as_missing_ids()
+    {
+        using var staffClient = fixture.Application.CreateClient();
+        using var staffLogin = await staffClient.PostAsJsonAsync("/api/v1/auth/login", new
+        {
+            email = fixture.StaffEmail,
+            password = ApiDatabaseFixture.Password
+        });
+        using var staffJson = JsonDocument.Parse(await staffLogin.Content.ReadAsStringAsync());
+        staffClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", staffJson.RootElement.GetProperty("accessToken").GetString());
+        using var createdNeed = await staffClient.PostAsJsonAsync("/api/v1/needs", new
+        {
+            bloodType = (int)BloodType.OPositive,
+            unitsNeeded = 2,
+            urgency = (int)UrgencyLevel.Routine,
+            neededByUtc = DateTime.UtcNow.AddHours(2),
+            note = "Private access regression"
+        });
+        Assert.Equal(HttpStatusCode.Created, createdNeed.StatusCode);
+        using var createdJson = JsonDocument.Parse(await createdNeed.Content.ReadAsStringAsync());
+        var needId = createdJson.RootElement.GetProperty("id").GetGuid();
+
+        using var ownerClient = await fixture.AuthenticatedClientAsync(fixture.AdminEmail);
+        Assert.Equal(HttpStatusCode.OK, (await ownerClient.GetAsync($"/api/v1/needs/{needId}")).StatusCode);
+
+        var (otherFacilityId, otherAdminEmail) = await fixture.CreateAdditionalApprovedFacilityAdminAsync();
+        Assert.NotEqual(fixture.FacilityId, otherFacilityId);
+        using var unrelatedClient = await fixture.AuthenticatedClientAsync(otherAdminEmail);
+        await using var db = fixture.CreateContext();
+        var needCountBefore = await db.BloodNeeds.CountAsync();
+        var auditCountBefore = await db.AuditLogs.CountAsync();
+
+        using var privateResponse = await unrelatedClient.GetAsync($"/api/v1/needs/{needId}");
+        using var missingResponse = await unrelatedClient.GetAsync($"/api/v1/needs/{Guid.NewGuid()}");
+        Assert.Equal(HttpStatusCode.NotFound, privateResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, missingResponse.StatusCode);
+        using var privateBody = JsonDocument.Parse(await privateResponse.Content.ReadAsStringAsync());
+        using var missingBody = JsonDocument.Parse(await missingResponse.Content.ReadAsStringAsync());
+        foreach (var property in new[] { "status", "title", "detail", "code" })
+            Assert.Equal(privateBody.RootElement.GetProperty(property).GetRawText(), missingBody.RootElement.GetProperty(property).GetRawText());
+        Assert.Equal("The requested resource was not found.", privateBody.RootElement.GetProperty("detail").GetString());
+        Assert.DoesNotContain(needId.ToString(), privateBody.RootElement.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(otherFacilityId.ToString(), privateBody.RootElement.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.True(privateBody.RootElement.TryGetProperty("traceId", out var traceId));
+        Assert.False(string.IsNullOrWhiteSpace(traceId.GetString()));
+        Assert.Equal(needCountBefore, await db.BloodNeeds.CountAsync());
+        Assert.Equal(auditCountBefore, await db.AuditLogs.CountAsync());
+    }
+
+    [Fact]
     public async Task Development_registration_is_auto_approved_and_persisted()
     {
         using var client = fixture.Application.CreateClient();
@@ -325,6 +376,43 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
     public async Task<int> NeedCountAsync()
     { await using var db = CreateContext(); return await db.BloodNeeds.CountAsync(); }
     public WebApplicationFactory<Program> CreateApplication(string environmentName) => new ApiApplication(connectionString, environmentName);
+
+    public async Task<HttpClient> AuthenticatedClientAsync(string email)
+    {
+        var client = Application.CreateClient();
+        using var response = await client.PostAsJsonAsync("/api/v1/auth/login", new { email, password = Password });
+        response.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", body.RootElement.GetProperty("accessToken").GetString());
+        return client;
+    }
+
+    public async Task<(Guid FacilityId, string AdminEmail)> CreateAdditionalApprovedFacilityAdminAsync()
+    {
+        using var scope = Application.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BloodLinkDbContext>();
+        var facilityId = Guid.NewGuid();
+        db.Facilities.Add(new Facility
+        {
+            Id = facilityId,
+            Name = "API Private Record Facility",
+            FacilityType = FacilityType.Hospital,
+            RegistrationNumber = $"PRIVATE-{Guid.NewGuid():N}",
+            Region = "Greater Accra",
+            City = "Accra",
+            Address = "Private record test address",
+            ContactEmail = $"facility-{Guid.NewGuid():N}@api.test",
+            ContactPhone = "0200000000",
+            Status = FacilityStatus.Approved,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync();
+        var users = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var email = $"admin-{Guid.NewGuid():N}@api.test";
+        await AddUserAsync(users, email, RoleNames.FacilityAdmin, facilityId);
+        return (facilityId, email);
+    }
 
     public async Task DisposeAsync()
     {

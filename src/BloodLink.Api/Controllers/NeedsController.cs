@@ -35,7 +35,18 @@ public sealed class NeedsController(IBloodNeedService needs) : ControllerBase
     public async Task<ActionResult<BloodNeedDetailDto>> Get(Guid id, CancellationToken cancellationToken)
     {
         var item = await needs.GetAsync(id, cancellationToken);
-        return item is null ? NotFound() : Ok(item);
+        if (item is null)
+        {
+            return NotFound(new ProblemDetails
+            {
+                Status = StatusCodes.Status404NotFound,
+                Title = "Resource not found",
+                Detail = "The requested resource was not found.",
+                Extensions = { ["traceId"] = HttpContext.TraceIdentifier, ["code"] = "resource_not_found" }
+            });
+        }
+
+        return Ok(item);
     }
 
     [Authorize(Policy = AuthorizationPolicies.RequireFacilityAdmin), HttpGet("{id:guid}/timeline")]

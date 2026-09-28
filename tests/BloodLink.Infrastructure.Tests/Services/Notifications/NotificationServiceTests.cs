@@ -1,4 +1,5 @@
 using BloodLink.Domain.Entities;
+using PrivateResourceNotFoundException = BloodLink.Domain.Exceptions.PrivateResourceNotFoundException;
 using BloodLink.Domain.Enums;
 using BloodLink.Application.Contracts;
 using BloodLink.Application.DTOs;
@@ -44,7 +45,7 @@ public sealed class NotificationServiceTests
         Assert.True(dbContext.Notifications.Single(notification => notification.Id == mine.Id).IsRead);
         Assert.NotNull(firstReadAt);
         Assert.Equal(firstReadAt, dbContext.Notifications.Single(notification => notification.Id == mine.Id).ReadAtUtc);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.MarkReadAsync(other.Id));
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() => service.MarkReadAsync(other.Id));
     }
 
     [Fact]

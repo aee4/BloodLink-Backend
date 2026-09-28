@@ -80,7 +80,7 @@ public sealed class RequestResponseAcceptanceTests
         adminAUser.RoleList.Add(RoleNames.FacilityAdmin);
         var requestServiceAsWrongSide = new BloodRequestService(dbContext, adminAUser, inventory);
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<BloodLink.Domain.Exceptions.PrivateResourceNotFoundException>(() =>
             requestServiceAsWrongSide.AcceptAsync(new RequestResponseRequest(requestId, 2, null)));
     }
 }

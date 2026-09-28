@@ -2,6 +2,7 @@ using BloodLink.Application.DTOs;
 using BloodLink.Application.Contracts;
 using BloodLink.Application.Interfaces;
 using BloodLink.Domain.Entities;
+using PrivateResourceNotFoundException = BloodLink.Domain.Exceptions.PrivateResourceNotFoundException;
 using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Services.Common;
 using Microsoft.EntityFrameworkCore;
@@ -111,7 +112,7 @@ public sealed class NotificationService(
 
         if (notification is null || notification.RecipientUserId != userId)
         {
-            throw new UnauthorizedAccessException("The notification was not found for your account.");
+            throw new PrivateResourceNotFoundException();
         }
 
         if (!notification.IsRead)

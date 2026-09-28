@@ -26,6 +26,14 @@ public sealed class EntityNotFoundException : BloodLinkException
 }
 
 /// <summary>
+/// Thrown when a resource is missing or not visible to the current caller.
+/// </summary>
+public sealed class PrivateResourceNotFoundException : BloodLinkException
+{
+    public PrivateResourceNotFoundException() : base("The requested resource was not found.") { }
+}
+
+/// <summary>
 /// Thrown when an operation is unauthorized for the current user.
 /// </summary>
 public sealed class UnauthorizedAccessException : BloodLinkException

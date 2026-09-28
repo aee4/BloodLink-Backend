@@ -1,6 +1,7 @@
 using BloodLink.Application.Contracts;
 using BloodLink.Application.DTOs;
 using BloodLink.Domain.Enums;
+using PrivateResourceNotFoundException = BloodLink.Domain.Exceptions.PrivateResourceNotFoundException;
 using BloodLink.Infrastructure.Services.Needs;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -232,9 +233,9 @@ public sealed class BloodNeedServiceTests
         Assert.Equal(BloodNeedStatus.Searching, timeline[1].ToStatus);
         Assert.All(timeline, item => Assert.False(string.IsNullOrWhiteSpace(item.ActorDisplayName)));
         Assert.Equal(BloodNeedStatus.Searching, (await adminService.GetAsync(need.Id))!.Status);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             new BloodNeedService(dbContext, StaffUser("staff-other", WorkflowTestSupport.FacilityAId)).GetAsync(need.Id));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             new BloodNeedService(dbContext, AdminUser("admin-b", WorkflowTestSupport.FacilityBId)).GetAsync(need.Id));
         Assert.Null(await creatorService.GetAsync(Guid.NewGuid()));
     }
@@ -246,7 +247,7 @@ public sealed class BloodNeedServiceTests
         var need = WorkflowTestSupport.AddNeed(dbContext, WorkflowTestSupport.FacilityBId, "staff-b");
         var service = new BloodNeedService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId));
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             service.StartSearchAsync(new NeedDecisionRequest(need.Id, null)));
     }
 
@@ -419,7 +420,7 @@ public sealed class BloodNeedServiceTests
         var need = WorkflowTestSupport.AddNeed(dbContext, WorkflowTestSupport.FacilityBId, "staff-b");
         var otherFacilityService = new BloodNeedService(dbContext, AdminUser("admin-a", WorkflowTestSupport.FacilityAId));
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
             otherFacilityService.RejectAsync(new NeedDecisionRequest(need.Id, "Not ours")));
         Assert.Equal(BloodNeedStatus.PendingReview, need.Status);
         Assert.Empty(dbContext.BloodNeedStatusHistory);
@@ -464,12 +465,14 @@ public sealed class BloodNeedServiceTests
         var inactiveCreator = StaffUser("staff-a", WorkflowTestSupport.FacilityAId);
         inactiveCreator.IsActive = false;
 
-        foreach (var actor in new[] { differentStaff, unrelatedAdmin, systemAdmin, inactiveCreator })
+        foreach (var actor in new[] { differentStaff, unrelatedAdmin, systemAdmin })
         {
             var service = new BloodNeedService(dbContext, actor);
-            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            await Assert.ThrowsAsync<PrivateResourceNotFoundException>(() =>
                 service.CancelAsync(new NeedDecisionRequest(need.Id, "No longer needed")));
         }
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            new BloodNeedService(dbContext, inactiveCreator).CancelAsync(new NeedDecisionRequest(need.Id, "No longer needed")));
 
         Assert.Equal(BloodNeedStatus.PendingReview, need.Status);
         Assert.Empty(dbContext.BloodNeedStatusHistory);

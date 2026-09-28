@@ -3,6 +3,7 @@ using BloodLink.Application.DTOs;
 using BloodLink.Application.Interfaces;
 using BloodLink.Domain.Entities;
 using BloodLink.Domain.Enums;
+using BloodLink.Domain.Exceptions;
 using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Services.Common;
 using Microsoft.EntityFrameworkCore;
@@ -204,13 +205,13 @@ public sealed class BloodNeedService(
     {
         var userId = ServiceGuards.RequireAuthenticatedActiveUser(currentUser);
         var need = await dbContext.BloodNeeds.SingleOrDefaultAsync(item => item.Id == request.BloodNeedId, cancellationToken)
-            ?? throw new InvalidOperationException("The blood need was not found.");
+            ?? throw new PrivateResourceNotFoundException();
         var isAdmin = currentUser.IsInRole(RoleNames.FacilityAdmin) && currentUser.BelongsToFacility(need.FacilityId);
         var isCreator = need.RequestedByUserId == userId && currentUser.IsInRole(RoleNames.FacilityStaff)
             && currentUser.BelongsToFacility(need.FacilityId);
         if (!isCreator && !isAdmin)
         {
-            throw new UnauthorizedAccessException("You are not authorized to cancel this blood need.");
+            throw new PrivateResourceNotFoundException();
         }
         if (isCreator && need.Status != BloodNeedStatus.PendingReview && !isAdmin)
         {
@@ -287,7 +288,7 @@ public sealed class BloodNeedService(
             && currentUser.BelongsToFacility(need.FacilityId);
         if (!isAdmin && !isCreator)
         {
-            throw new UnauthorizedAccessException("You are not authorized to view this blood need.");
+            throw new PrivateResourceNotFoundException();
         }
         await ServiceGuards.RequireApprovedFacilityAsync(dbContext, need.FacilityId, cancellationToken);
         return need;
@@ -298,10 +299,10 @@ public sealed class BloodNeedService(
         var facilityId = ServiceGuards.RequireFacilityRole(currentUser, RoleNames.FacilityAdmin);
         await ServiceGuards.RequireApprovedFacilityAsync(dbContext, facilityId, cancellationToken);
         var need = await dbContext.BloodNeeds.SingleOrDefaultAsync(item => item.Id == bloodNeedId, cancellationToken)
-            ?? throw new InvalidOperationException("The blood need was not found.");
+            ?? throw new PrivateResourceNotFoundException();
         if (need.FacilityId != facilityId)
         {
-            throw new UnauthorizedAccessException("You are not authorized to act on this blood need.");
+            throw new PrivateResourceNotFoundException();
         }
         return need;
     }
