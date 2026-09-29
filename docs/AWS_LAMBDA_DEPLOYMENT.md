@@ -12,7 +12,7 @@ BloodLink production backend deploys in `eu-north-1` as API Gateway HTTP API -> 
 - Temporary CORS origin: `https://placeholder.invalid`
 - API URL: `https://wvsrmqrfc0.execute-api.eu-north-1.amazonaws.com`
 - VPC: `vpc-06ca9c8c833aa836f`; Lambda security group: `sg-0ea078ae2a905da5d`
-- RDS security group: `sg-04889148f20f5703d`; Lambda subnets: `subnet-0670644834b1957d8`, `subnet-0b9669ba487ef020b`
+- Dedicated RDS security group: `sg-010ba11cbab916359` (`bloodlink-production-rds`); Lambda subnets: `subnet-0670644834b1957d8`, `subnet-0b9669ba487ef020b`
 - Secrets Manager interface endpoint: private DNS enabled in the same two VPC subnets
 - HTTP API stage throttle: 5 requests/second, burst 10
 
@@ -41,6 +41,8 @@ Discover the RDS network values rather than hardcoding screenshots:
 ```powershell
 aws rds describe-db-instances --region eu-north-1 --db-instance-identifier bloodlink-db
 ```
+
+Use the dedicated RDS security group, never the VPC default group, for `RdsSecurityGroupId`. In the verified production state, `bloodlink-db` has only `sg-010ba11cbab916359` attached. That group's sole inbound rule is TCP 1433 from `sg-0ea078ae2a905da5d`, with no IPv4 or IPv6 CIDR source.
 
 Deploy with explicit parameters:
 
@@ -82,9 +84,11 @@ aws cloudformation describe-stacks --region eu-north-1 --stack-name bloodlink-ba
 
 Verify `/health`, `/health/ready`, authentication, refresh rotation, logout, protected `401`, wrong-role `403`, private/missing generic `404`, invalid input `400`, lifecycle conflict `409`, CORS rejection for unapproved origins, and persistence of database mutations. Inspect CloudWatch log groups for both Lambdas and confirm secrets, tokens, authorization headers, complete connection strings, SQL details, and stack traces are not disclosed to clients.
 
-The repeatable live checks are available as `scripts/verify-aws-production.ps1` and `scripts/check-aws-cloudwatch-secrets.ps1`. They print only check results. The live HTTP check reads the bootstrap secret into process memory to authenticate; it never displays the credential or tokens. The CloudWatch scan compares log events to secret values in memory and reports match counts only.
+Run `scripts/complete-aws-production-verification.ps1` for the complete repeatable check. It validates the caller, stack, private RDS attachment, security-group rules, migration history, bootstrap idempotency, live API behavior, and CloudWatch disclosures. It prompts for the SystemAdmin password with hidden input only when live login begins and writes sanitized evidence to the ignored `artifacts/aws-production-verification.json` path.
 
-The RDS instance remains `PubliclyAccessible=false`. TCP 1433 ingress is sourced only from the dedicated Lambda security group; no IPv4 or IPv6 CIDR SQL ingress is present. The original RDS security group is not replaced. Lambda outbound access is limited to TCP 1433 to that RDS group and TCP 443 to the Secrets Manager endpoint group. The interface endpoint is required because this VPC has no NAT gateway.
+The RDS instance remains `PubliclyAccessible=false`. TCP 1433 ingress is sourced only from the dedicated Lambda security group; no IPv4 or IPv6 CIDR SQL ingress is present. The VPC default security group `sg-04889148f20f5703d` is detached from RDS and remains otherwise untouched. Lambda outbound access includes TCP 1433 to the dedicated RDS group and TCP 443 to the Secrets Manager endpoint group. The interface endpoint is required because this VPC has no NAT gateway.
+
+The current stack parameter still records the formerly attached default group. Before a future controlled stack update, set `RdsSecurityGroupId=sg-010ba11cbab916359` and inspect the change set carefully; do not reattach the default group or recreate RDS.
 
 ## Frontend CORS Update
 

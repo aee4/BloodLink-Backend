@@ -71,6 +71,12 @@ public static class Program
                 throw new InvalidOperationException();
             }
 
+            if (bootstrap["enabled"]?.GetValue<bool>() == false)
+            {
+                Console.Out.WriteLine("Bootstrap was already disabled in bloodlink/prod/bootstrap.");
+                return 0;
+            }
+
             bootstrap["enabled"] = false;
             updatedSecret = secret!.ToJsonString(SerializerOptions.Options);
             await client.PutSecretValueAsync(new PutSecretValueRequest

@@ -32,6 +32,7 @@ launchSettings.json
 
 # Build and publish output
 artifacts/
+artifacts/aws-production-verification.json
 publish/
 .aws-sam/
 *.log
