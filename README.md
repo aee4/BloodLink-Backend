@@ -2,6 +2,15 @@
 
 BloodLink Backend is the independently buildable .NET 8 API and domain/service implementation for the BloodLink school project. It contains the Domain, Application, Infrastructure, versioned ASP.NET Core API, and applicable unit, acceptance, API integration, and SQL Server relational tests. It does not contain the former Razor frontend.
 
+## Production
+
+- Production API: https://wvsrmqrfc0.execute-api.eu-north-1.amazonaws.com
+- Live frontend: https://d2z1pcfp95dfwd.cloudfront.net
+- Backend repository: https://github.com/aee4/BloodLink-Backend
+- Frontend repository: https://github.com/aee4/BloodLink-Frontend
+
+For local setup, install the .NET 8 SDK and use the commands under [Configure And Run](#configure-and-run). AWS deployment and verification procedures are documented in [deployment](docs/DEPLOYMENT.md). Password-reset delivery is currently disabled.
+
 ## Architecture
 
 `BloodLink.Domain` has no project dependencies. `BloodLink.Application` depends on Domain, and `BloodLink.Infrastructure` implements the application contracts using EF Core, SQL Server, and ASP.NET Core Identity. `BloodLink.Api` is the HTTP host and depends on Application and Infrastructure. API controllers translate HTTP DTOs to existing service requests; business rules and record scoping remain in the services. See [architecture](docs/ARCHITECTURE.md) and [API contracts](docs/API_CONTRACTS.md).
