@@ -39,13 +39,14 @@ For an explicit schema update, use `dotnet ef database update --project src/Bloo
 ## Tests And Quality Gates
 
 ```powershell
-$env:BLOODLINK_TEST_SQLSERVER = 'Server=(localdb)\MSSQLLocalDB;Database=master;Trusted_Connection=True;MultipleActiveResultSets=true;TrustServerCertificate=True'
 dotnet test BloodLink.Backend.sln --configuration Release
 dotnet test tests/BloodLink.Relational.Tests --configuration Release
 dotnet format BloodLink.Backend.sln --verify-no-changes
 dotnet list BloodLink.Backend.sln package --vulnerable --include-transitive
 dotnet ef migrations has-pending-model-changes --project src/BloodLink.Infrastructure --startup-project src/BloodLink.Api
 ```
+
+Before running these suites, configure `BLOODLINK_TEST_SQLSERVER` for your local SQL Server or LocalDB test database.
 
 The API test fixture creates and drops a uniquely named disposable LocalDB database. Relational tests require `BLOODLINK_TEST_SQLSERVER` and also create isolated databases. Never point test suites at a shared or production database.
 
