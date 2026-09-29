@@ -20,7 +20,7 @@ Development defaults are in `src/BloodLink.Api/appsettings.Development.json`. `a
 
 ## Release and network
 
-Build with `dotnet publish src/BloodLink.Api/BloodLink.Api.csproj -c Release`. Apply migrations as a reviewed deployment step using the EF tool and the API startup project. Configure TLS termination and forwarded headers at the trusted reverse proxy; do not trust forwarded scheme/host headers from arbitrary clients. The API requires HTTPS in Production and HSTS is enabled. Permit only the frontend origins and the required methods/headers; credentials are not enabled. `/health` is liveness and `/health/ready` includes the database readiness check.
+Build with `dotnet publish src/BloodLink.Api/BloodLink.Api.csproj -c Release`. Apply migrations as a reviewed deployment step using the EF tool and the API startup project. Configure TLS termination and forwarded headers at the trusted reverse proxy; do not trust forwarded scheme/host headers from arbitrary clients. The API requires HTTPS in Production and HSTS is enabled. The production frontend origin is exactly `https://d2z1pcfp95dfwd.cloudfront.net`; CORS permits only `GET`, `POST`, `PUT`, `Authorization`, and `Content-Type`, with credentials disabled. `/health` is liveness and `/health/ready` includes the database readiness check.
 
 Do not place secrets in command history, logs, source control, exception text, or client bundles. Restrict access to Swagger in production if enabled. Configure database backups, availability monitoring, log retention, key rotation, and deployment-specific network controls outside this repository.
 

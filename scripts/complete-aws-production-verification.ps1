@@ -131,12 +131,14 @@ function Invoke-BloodLinkApiRequest(
     [string]$Token = "",
     [object]$Body = $null,
     [string]$Origin = "",
-    [string]$RequestedMethod = ""
+    [string]$RequestedMethod = "",
+    [string]$RequestedHeaders = ""
 ) {
     $headers = @{}
     if ($Token) { $headers.Authorization = "Bearer $Token" }
     if ($Origin) { $headers.Origin = $Origin }
     if ($RequestedMethod) { $headers["Access-Control-Request-Method"] = $RequestedMethod }
+    if ($RequestedHeaders) { $headers["Access-Control-Request-Headers"] = $RequestedHeaders }
     $parameters = @{
         Method = $Method
         Uri = "$($ApiUrl.TrimEnd('/'))$Path"
@@ -311,6 +313,8 @@ function Invoke-BloodLinkProductionVerification {
     $rng = $null
     $smokeFacilityId = $null
     $apiUrl = $null
+    $expectedApiUrl = "https://wvsrmqrfc0.execute-api.eu-north-1.amazonaws.com"
+    $expectedFrontendOrigin = "https://d2z1pcfp95dfwd.cloudfront.net"
     $evidence = [ordered]@{
         schemaVersion = 1
         startedAtUtc = $startedAt.ToString("o")
@@ -357,17 +361,45 @@ function Invoke-BloodLinkProductionVerification {
         $apiUri = $null
         $apiUrl = $outputs.ApiUrl.TrimEnd('/')
         Add-LiveCheck "API output is HTTPS" ([Uri]::TryCreate($apiUrl, [UriKind]::Absolute, [ref]$apiUri) -and $apiUri.Scheme -eq "https")
+        Add-LiveCheck "Production API URL is unchanged" ($apiUrl -eq $expectedApiUrl)
         $parameters = @{}
         foreach ($item in @($stack.Parameters)) { $parameters[[string]$item.ParameterKey] = [string]$item.ParameterValue }
         $expectedVpcId = $parameters.VpcId
         Add-LiveCheck "Stack VPC parameter exists" (-not [string]::IsNullOrWhiteSpace($expectedVpcId))
+        Add-LiveCheck "Stack CORS parameter is the exact CloudFront origin" ($parameters.CorsOrigin -eq $expectedFrontendOrigin)
         $evidence.stack.name = "bloodlink-backend-prod"
         $evidence.stack.status = [string]$stack.StackStatus
         $evidence.stack.id = [string]$stack.StackId
         $evidence.stack.apiUrl = $apiUrl
+        $evidence.stack.corsOrigin = [string]$parameters.CorsOrigin
         $evidence.stack.migratorFunctionName = $outputs.MigratorFunctionName
         $evidence.stack.lambdaSecurityGroupId = $outputs.LambdaSecurityGroupId
         $evidence.stack.vpcId = $expectedVpcId
+
+        $apiId = $apiUri.Host.Split('.')[0]
+        $gateway = Invoke-BloodLinkAwsJson @("apigatewayv2", "get-api", "--region", $Region,
+            "--api-id", $apiId, "--output", "json") "API Gateway CORS inspection"
+        $gatewayOrigins = @($gateway.CorsConfiguration.AllowOrigins | ForEach-Object { [string]$_ })
+        Add-LiveCheck "API Gateway allows only the exact CloudFront origin" (
+            $gatewayOrigins.Count -eq 1 -and $gatewayOrigins[0] -eq $expectedFrontendOrigin -and
+            @($gatewayOrigins | Where-Object { $_ -eq "*" }).Count -eq 0
+        )
+        $gatewayMethods = @($gateway.CorsConfiguration.AllowMethods | ForEach-Object { ([string]$_).ToUpperInvariant() })
+        Add-LiveCheck "API Gateway CORS methods are GET, POST, and PUT only" (
+            $gatewayMethods.Count -eq 3 -and @("GET", "POST", "PUT" | Where-Object { $gatewayMethods -notcontains $_ }).Count -eq 0
+        )
+        $gatewayHeaders = @($gateway.CorsConfiguration.AllowHeaders | ForEach-Object { ([string]$_).ToLowerInvariant() })
+        Add-LiveCheck "API Gateway CORS headers are Authorization and Content-Type only" (
+            $gatewayHeaders.Count -eq 2 -and @("authorization", "content-type" | Where-Object { $gatewayHeaders -notcontains $_ }).Count -eq 0
+        )
+        $apiFunctionResource = Invoke-BloodLinkAwsJson @("cloudformation", "describe-stack-resources", "--region", $Region,
+            "--stack-name", "bloodlink-backend-prod", "--output", "json") "API Lambda resource discovery"
+        $apiFunction = @($apiFunctionResource.StackResources | Where-Object { $_.LogicalResourceId -eq "ApiFunction" })
+        Add-LiveCheck "API Lambda function was discovered" ($apiFunction.Count -eq 1)
+        $lambdaCorsOrigin = Invoke-BloodLinkAwsJson @("lambda", "get-function-configuration", "--region", $Region,
+            "--function-name", [string]$apiFunction[0].PhysicalResourceId,
+            "--query", "Environment.Variables.Api__AllowedOrigins__0", "--output", "json") "API Lambda CORS inspection"
+        Add-LiveCheck "API Lambda allows the exact CloudFront origin" ([string]$lambdaCorsOrigin -eq $expectedFrontendOrigin)
 
         $rdsResponse = Invoke-BloodLinkAwsJson @("rds", "describe-db-instances", "--region", $Region,
             "--db-instance-identifier", "bloodlink-db", "--output", "json") "RDS inspection"
@@ -473,6 +505,40 @@ function Invoke-BloodLinkProductionVerification {
         $evidence.bootstrap.migratorSecretDetached = $bootstrapNotAttached
         $evidence.bootstrap.migratorIamDetached = $bootstrapPolicyReferences -eq 0
 
+        $corsPreflight = Invoke-BloodLinkApiRequest $apiUrl OPTIONS "/health" "" $null `
+            $expectedFrontendOrigin POST "authorization,content-type"
+        $corsOriginHeader = Get-BloodLinkHeader $corsPreflight.Headers "Access-Control-Allow-Origin"
+        Add-LiveCheck "CloudFront CORS preflight succeeds" ($corsPreflight.StatusCode -in @(200, 204))
+        Add-LiveCheck "CloudFront CORS preflight returns the exact origin" ($corsOriginHeader -eq $expectedFrontendOrigin)
+        Add-LiveCheck "CORS does not emit a wildcard origin" ($corsOriginHeader -ne "*")
+        Add-LiveCheck "CloudFront preflight permits POST" (
+            ((Get-BloodLinkHeader $corsPreflight.Headers "Access-Control-Allow-Methods").Split(',') |
+                ForEach-Object { $_.Trim().ToUpperInvariant() }) -contains "POST"
+        )
+        $corsAllowedHeaders = @((Get-BloodLinkHeader $corsPreflight.Headers "Access-Control-Allow-Headers").Split(',') |
+            ForEach-Object { $_.Trim().ToLowerInvariant() })
+        Add-LiveCheck "CloudFront preflight permits Authorization and Content-Type" (
+            $corsAllowedHeaders -contains "authorization" -and $corsAllowedHeaders -contains "content-type"
+        )
+        Add-LiveCheck "CORS does not enable credentials" (
+            [string]::IsNullOrWhiteSpace((Get-BloodLinkHeader $corsPreflight.Headers "Access-Control-Allow-Credentials"))
+        )
+        $normalCorsResponse = Invoke-BloodLinkApiRequest $apiUrl GET "/health" "" $null $expectedFrontendOrigin
+        Add-LiveCheck "Normal API response includes the exact CloudFront origin" (
+            $normalCorsResponse.StatusCode -eq 200 -and
+            (Get-BloodLinkHeader $normalCorsResponse.Headers "Access-Control-Allow-Origin") -eq $expectedFrontendOrigin
+        )
+        foreach ($untrustedOrigin in @(
+            "https://example.com",
+            "https://evil.example",
+            "http://d2z1pcfp95dfwd.cloudfront.net",
+            "https://d2z1pcfp95dfwd.cloudfront.net.evil.example"
+        )) {
+            $deniedCors = Invoke-BloodLinkApiRequest $apiUrl OPTIONS "/health" "" $null $untrustedOrigin POST "authorization,content-type"
+            $deniedOriginHeader = Get-BloodLinkHeader $deniedCors.Headers "Access-Control-Allow-Origin"
+            Add-LiveCheck "Untrusted CORS origin is denied: $untrustedOrigin" ([string]::IsNullOrWhiteSpace($deniedOriginHeader))
+        }
+
         $bootstrapEmail = Read-Host "Bootstrap SystemAdmin email"
         if ([string]::IsNullOrWhiteSpace($bootstrapEmail)) { throw "Bootstrap SystemAdmin email is required for live login." }
         $bootstrapPasswordSecure = Read-Host "Bootstrap SystemAdmin password" -AsSecureString
@@ -486,11 +552,10 @@ function Invoke-BloodLinkProductionVerification {
         $readiness = Invoke-BloodLinkApiRequest $apiUrl GET "/health/ready"
         $clientBodies.Add($readiness.Content)
         Add-LiveCheck "Database readiness endpoint" ($readiness.StatusCode -eq 200)
-
-        $allowedCors = Invoke-BloodLinkApiRequest $apiUrl OPTIONS "/health" "" $null "https://placeholder.invalid" GET
-        Add-LiveCheck "Temporary placeholder CORS origin is allowed" ((Get-BloodLinkHeader $allowedCors.Headers "Access-Control-Allow-Origin") -eq "https://placeholder.invalid")
-        $deniedCors = Invoke-BloodLinkApiRequest $apiUrl OPTIONS "/health" "" $null "https://unapproved.invalid" GET
-        Add-LiveCheck "Unauthorized CORS origin is rejected" ((Get-BloodLinkHeader $deniedCors.Headers "Access-Control-Allow-Origin") -ne "https://unapproved.invalid")
+        Add-LiveCheck "Health request without Origin remains available" (
+            $health.StatusCode -eq 200 -and
+            [string]::IsNullOrWhiteSpace((Get-BloodLinkHeader $health.Headers "Access-Control-Allow-Origin"))
+        )
 
         $login = Invoke-BloodLinkApiRequest $apiUrl POST "/api/v1/auth/login" "" @{ email = $bootstrapEmail; password = $bootstrapPasswordPlain }
         Add-LiveCheck "SystemAdmin login" ($login.StatusCode -eq 200)
@@ -606,6 +671,7 @@ function Invoke-BloodLinkProductionVerification {
         $evidence.cloudWatch.windowStartUtc = $startedAt.AddHours(-24).ToString("o")
         $evidence.cloudWatch.disclosureCounts = $disclosures
         $evidence.api.url = $apiUrl
+        $evidence.api.allowedFrontendOrigin = $expectedFrontendOrigin
         $evidence.api.clientDisclosureCount = $clientDisclosureCount
         $evidence.api.liveChecksPassed = @($checks | Where-Object { $_.status -eq "PASS" }).Count
 

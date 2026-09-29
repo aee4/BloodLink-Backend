@@ -34,6 +34,29 @@ public sealed class LambdaDeploymentTests
     }
 
     [Fact]
+    public void Production_accepts_the_exact_cloudfront_origin()
+    {
+        var builder = CreateProductionBuilder("https://d2z1pcfp95dfwd.cloudfront.net");
+
+        builder.AddBloodLinkApi();
+    }
+
+    [Fact]
+    public void Production_template_uses_one_exact_origin_for_gateway_and_lambda()
+    {
+        var root = FindRepositoryRoot();
+        var template = File.ReadAllText(Path.Combine(root, "template.yaml"));
+        var startup = File.ReadAllText(Path.Combine(root, "src", "BloodLink.Api", "Configuration", "BloodLinkApiStartup.cs"));
+
+        Assert.Contains("Default: https://d2z1pcfp95dfwd.cloudfront.net", template, StringComparison.Ordinal);
+        Assert.Contains("Api__AllowedOrigins__0: !Ref CorsOrigin", template, StringComparison.Ordinal);
+        Assert.Matches("AllowOrigins:\\s+- !Ref CorsOrigin", template);
+        Assert.Contains("AllowedPattern: '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$'", template, StringComparison.Ordinal);
+        Assert.DoesNotContain("placeholder.invalid", template, StringComparison.Ordinal);
+        Assert.DoesNotContain("AllowAnyOrigin", startup, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Production_rejects_invalid_token_lifetime_configuration()
     {
         var builder = CreateProductionBuilder();
@@ -44,7 +67,7 @@ public sealed class LambdaDeploymentTests
         Assert.Contains("access-token lifetime", exception.Message, StringComparison.Ordinal);
     }
 
-    private static WebApplicationBuilder CreateProductionBuilder(string origin = "https://placeholder.invalid")
+    private static WebApplicationBuilder CreateProductionBuilder(string origin = "https://d2z1pcfp95dfwd.cloudfront.net")
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Production" });
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>

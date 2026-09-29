@@ -23,8 +23,9 @@ Parameters:
     Default: bloodlink/prod/bootstrap
   CorsOrigin:
     Type: String
-    Default: https://placeholder.invalid
-    AllowedPattern: '^https://[^*]+$'
+    Description: Exact HTTPS browser origin, without a path or trailing slash.
+    Default: https://d2z1pcfp95dfwd.cloudfront.net
+    AllowedPattern: '^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$'
 
 Globals:
   Function:
@@ -60,7 +61,6 @@ Resources:
           - GET
           - POST
           - PUT
-          - OPTIONS
         AllowHeaders:
           - Authorization
           - Content-Type

@@ -9,7 +9,7 @@ BloodLink production backend deploys in `eu-north-1` as API Gateway HTTP API -> 
 - API: `BloodLink.Api` on the managed .NET 8 Lambda runtime
 - Migrator: `BloodLink.DatabaseMigrator`, private Lambda with no API Gateway route
 - Secrets by name only: `bloodlink/prod/database`, `bloodlink/prod/authentication`, `bloodlink/prod/bootstrap`
-- Temporary CORS origin: `https://placeholder.invalid`
+- Production CORS origin: `https://d2z1pcfp95dfwd.cloudfront.net`
 - API URL: `https://wvsrmqrfc0.execute-api.eu-north-1.amazonaws.com`
 - VPC: `vpc-06ca9c8c833aa836f`; Lambda security group: `sg-0ea078ae2a905da5d`
 - Dedicated RDS security group: `sg-010ba11cbab916359` (`bloodlink-production-rds`); Lambda subnets: `subnet-0670644834b1957d8`, `subnet-0b9669ba487ef020b`
@@ -57,7 +57,7 @@ sam deploy `
     VpcId=<rds-vpc-id> `
     LambdaSubnetIds="<subnet-a>,<subnet-b>" `
     RdsSecurityGroupId=<rds-security-group-id> `
-    CorsOrigin=https://placeholder.invalid
+    CorsOrigin=https://d2z1pcfp95dfwd.cloudfront.net
 ```
 
 Invoke the private migrator after deployment, using a temporary output file and deleting it afterward:
@@ -92,7 +92,28 @@ The current stack parameter still records the formerly attached default group. B
 
 ## Frontend CORS Update
 
-After Amplify provides the frontend URL, update the stack by replacing `https://placeholder.invalid` with the exact Amplify HTTPS origin in `CorsOrigin`. Do not use a wildcard origin.
+The production frontend origin is exactly `https://d2z1pcfp95dfwd.cloudfront.net`; the API is `https://wvsrmqrfc0.execute-api.eu-north-1.amazonaws.com`. The `CorsOrigin` parameter configures both API Gateway HTTP API CORS and the Lambda `Api__AllowedOrigins__0` setting. It accepts only an HTTPS hostname and optional port, without a path or trailing slash. The API allows only `GET`, `POST`, and `PUT`, and only the `Authorization` and `Content-Type` request headers. Credentialed CORS is disabled.
+
+For this CORS-only update, all captured stack parameters were passed explicitly. In particular, `RdsSecurityGroupId` retained its existing historical stack parameter value so this update could not change database security-group wiring:
+
+```powershell
+sam deploy `
+  --region eu-north-1 `
+  --stack-name bloodlink-backend-prod `
+  --resolve-s3 `
+  --capabilities CAPABILITY_IAM `
+  --no-confirm-changeset `
+  --parameter-overrides `
+    VpcId=vpc-06ca9c8c833aa836f `
+    LambdaSubnetIds="subnet-0670644834b1957d8,subnet-0b9669ba487ef020b" `
+    RdsSecurityGroupId=sg-04889148f20f5703d `
+    DatabaseSecretName=bloodlink/prod/database `
+    AuthenticationSecretName=bloodlink/prod/authentication `
+    BootstrapSecretName=bloodlink/prod/bootstrap `
+    CorsOrigin=https://d2z1pcfp95dfwd.cloudfront.net
+```
+
+To change the origin later, update the `CorsOrigin` value in `template.yaml` and pass the new HTTPS origin explicitly to `sam deploy`. Preserve every other current stack parameter value, inspect the CloudFormation change set, and confirm it changes only API Gateway/Lambda configuration. Verify the exact origin and denied variants with `scripts/complete-aws-production-verification.ps1`; never add a wildcard, path, or trailing slash.
 
 ## Cost And Cleanup
 

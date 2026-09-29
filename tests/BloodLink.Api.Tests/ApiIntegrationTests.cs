@@ -9,6 +9,7 @@ using BloodLink.Domain.Entities;
 using BloodLink.Domain.Enums;
 using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Identity;
+using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Identity;
@@ -17,6 +18,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace BloodLink.Api.Tests;
 
@@ -63,19 +65,56 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
     }
 
     [Fact]
-    public async Task CORS_allows_only_the_configured_frontend_origin()
+    public async Task CORS_preflight_allows_exact_cloudfront_origin_and_required_headers_and_methods()
     {
         using var client = fixture.Application.CreateClient();
+        var policy = fixture.Application.Services.GetRequiredService<IOptions<CorsOptions>>().Value.GetPolicy("Frontend");
+        Assert.Contains("https://d2z1pcfp95dfwd.cloudfront.net", policy!.Origins);
         using var allowed = new HttpRequestMessage(HttpMethod.Options, "/api/v1/auth/login");
-        allowed.Headers.Add("Origin", "https://localhost:7081");
+        allowed.Headers.Add("Origin", "https://d2z1pcfp95dfwd.cloudfront.net");
         allowed.Headers.Add("Access-Control-Request-Method", "POST");
-        allowed.Headers.Add("Access-Control-Request-Headers", "content-type");
+        allowed.Headers.Add("Access-Control-Request-Headers", "authorization,content-type");
         using var allowedResponse = await client.SendAsync(allowed);
-        Assert.Equal("https://localhost:7081", allowedResponse.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        Assert.Equal(HttpStatusCode.NoContent, allowedResponse.StatusCode);
+        Assert.True(allowedResponse.Headers.TryGetValues("Access-Control-Allow-Origin", out var originValues),
+            $"Allowed CORS origin header missing. Response headers: {string.Join(", ", allowedResponse.Headers.Select(header => header.Key))}");
+        Assert.Equal("https://d2z1pcfp95dfwd.cloudfront.net", originValues!.Single());
+        Assert.DoesNotContain("*", originValues.Single());
         Assert.DoesNotContain("Access-Control-Allow-Credentials", allowedResponse.Headers.Select(item => item.Key));
+        var methods = allowedResponse.Headers.GetValues("Access-Control-Allow-Methods").Single()
+            .Split(',').Select(method => method.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(3, methods.Count);
+        Assert.Contains("GET", methods);
+        Assert.Contains("POST", methods);
+        Assert.Contains("PUT", methods);
+        Assert.DoesNotContain("DELETE", methods);
+        var headers = allowedResponse.Headers.GetValues("Access-Control-Allow-Headers").Single()
+            .Split(',').Select(header => header.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(2, headers.Count);
+        Assert.Contains("Authorization", headers);
+        Assert.Contains("Content-Type", headers);
 
+        using var normal = new HttpRequestMessage(HttpMethod.Get, "/health");
+        normal.Headers.Add("Origin", "https://d2z1pcfp95dfwd.cloudfront.net");
+        using var normalResponse = await client.SendAsync(normal);
+        Assert.Equal(HttpStatusCode.OK, normalResponse.StatusCode);
+        Assert.Equal("https://d2z1pcfp95dfwd.cloudfront.net", normalResponse.Headers.GetValues("Access-Control-Allow-Origin").Single());
+
+        using var withoutOrigin = await client.GetAsync("/health");
+        Assert.Equal(HttpStatusCode.OK, withoutOrigin.StatusCode);
+        Assert.False(withoutOrigin.Headers.Contains("Access-Control-Allow-Origin"));
+    }
+
+    [Theory]
+    [InlineData("https://example.com")]
+    [InlineData("https://evil.example")]
+    [InlineData("http://d2z1pcfp95dfwd.cloudfront.net")]
+    [InlineData("https://d2z1pcfp95dfwd.cloudfront.net.evil.example")]
+    public async Task CORS_preflight_denies_untrusted_origins(string origin)
+    {
+        using var client = fixture.Application.CreateClient();
         using var denied = new HttpRequestMessage(HttpMethod.Options, "/api/v1/auth/login");
-        denied.Headers.Add("Origin", "https://attacker.invalid");
+        denied.Headers.Add("Origin", origin);
         denied.Headers.Add("Access-Control-Request-Method", "POST");
         using var deniedResponse = await client.SendAsync(denied);
         Assert.False(deniedResponse.Headers.Contains("Access-Control-Allow-Origin"));
@@ -524,8 +563,17 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
         connectionString = new SqlConnectionStringBuilder(server) { InitialCatalog = databaseName }.ConnectionString;
         await using (var db = CreateContext()) await db.Database.MigrateAsync();
 
-        Application = new ApiApplication(connectionString);
-        _ = Application.CreateClient();
+        var previousOrigin = Environment.GetEnvironmentVariable("Api__AllowedOrigins__0");
+        Environment.SetEnvironmentVariable("Api__AllowedOrigins__0", "https://d2z1pcfp95dfwd.cloudfront.net");
+        try
+        {
+            Application = new ApiApplication(connectionString);
+            _ = Application.CreateClient();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("Api__AllowedOrigins__0", previousOrigin);
+        }
         using var scope = Application.Services.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<BloodLinkDbContext>();
         var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
@@ -648,8 +696,9 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
                 ["BloodLink:DatabaseInitialization:Enabled"] = "false",
                 ["BloodLink:FacilityRegistration:AutoApproveInDevelopment"] = "true",
                 ["Api:Tokens:SigningKey"] = "ApiTestKeyAtLeastThirtyTwoCharactersLongForHmacSigning!",
-                ["Api:AllowedOrigins:0"] = "https://localhost:7081",
-                ["Api:AllowedOrigins:1"] = "http://localhost:5081"
+                ["Api:AllowedOrigins:0"] = "https://d2z1pcfp95dfwd.cloudfront.net",
+                ["Api:AllowedOrigins:1"] = "https://localhost:7081",
+                ["Api:AllowedOrigins:2"] = "http://localhost:5081"
             }));
         }
     }

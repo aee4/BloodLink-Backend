@@ -25,12 +25,14 @@ function Invoke-ApiRequest(
     [string]$Token = "",
     [object]$Body = $null,
     [string]$Origin = "",
-    [string]$RequestedMethod = ""
+    [string]$RequestedMethod = "",
+    [string]$RequestedHeaders = ""
 ) {
     $headers = @{}
     if ($Token) { $headers["Authorization"] = "Bearer $Token" }
     if ($Origin) { $headers["Origin"] = $Origin }
     if ($RequestedMethod) { $headers["Access-Control-Request-Method"] = $RequestedMethod }
+    if ($RequestedHeaders) { $headers["Access-Control-Request-Headers"] = $RequestedHeaders }
 
     $parameters = @{
         Method = $Method
@@ -88,13 +90,35 @@ try {
     $swagger = Invoke-ApiRequest -Method GET -Path "/swagger/v1/swagger.json"
     Add-Check "Production Swagger disabled" ($swagger.StatusCode -eq 404)
 
-    $corsAllowed = Invoke-ApiRequest -Method OPTIONS -Path "/health" -Origin "https://placeholder.invalid" -RequestedMethod GET
+    $frontendOrigin = "https://d2z1pcfp95dfwd.cloudfront.net"
+    $corsAllowed = Invoke-ApiRequest -Method OPTIONS -Path "/health" -Origin $frontendOrigin `
+        -RequestedMethod POST -RequestedHeaders "authorization,content-type"
     $allowedOrigin = Get-HeaderValue $corsAllowed.Headers "Access-Control-Allow-Origin"
-    Add-Check "CORS allows temporary origin" ($allowedOrigin -eq "https://placeholder.invalid")
-
-    $corsDenied = Invoke-ApiRequest -Method OPTIONS -Path "/health" -Origin "https://unapproved.invalid" -RequestedMethod GET
-    $deniedOrigin = Get-HeaderValue $corsDenied.Headers "Access-Control-Allow-Origin"
-    Add-Check "CORS rejects unapproved origin" ([string]::IsNullOrEmpty($deniedOrigin) -or $deniedOrigin -ne "https://unapproved.invalid")
+    $allowedMethods = @((Get-HeaderValue $corsAllowed.Headers "Access-Control-Allow-Methods").Split(',') |
+        ForEach-Object { $_.Trim().ToUpperInvariant() })
+    $allowedHeaders = @((Get-HeaderValue $corsAllowed.Headers "Access-Control-Allow-Headers").Split(',') |
+        ForEach-Object { $_.Trim().ToLowerInvariant() })
+    Add-Check "CORS preflight allows exact CloudFront origin" ($corsAllowed.StatusCode -in @(200, 204) -and $allowedOrigin -eq $frontendOrigin)
+    Add-Check "CORS preflight supports POST, Authorization, and Content-Type" (
+        $allowedMethods -contains "POST" -and $allowedHeaders -contains "authorization" -and $allowedHeaders -contains "content-type")
+    Add-Check "CORS never emits wildcard or credentials" (
+        $allowedOrigin -ne "*" -and [string]::IsNullOrWhiteSpace((Get-HeaderValue $corsAllowed.Headers "Access-Control-Allow-Credentials")))
+    $normalCors = Invoke-ApiRequest -Method GET -Path "/health" -Origin $frontendOrigin
+    Add-Check "Normal response allows exact CloudFront origin" (
+        $normalCors.StatusCode -eq 200 -and (Get-HeaderValue $normalCors.Headers "Access-Control-Allow-Origin") -eq $frontendOrigin)
+    Add-Check "Missing-Origin request remains available" (
+        $health.StatusCode -eq 200 -and [string]::IsNullOrWhiteSpace((Get-HeaderValue $health.Headers "Access-Control-Allow-Origin")))
+    foreach ($untrustedOrigin in @(
+        "https://example.com",
+        "https://evil.example",
+        "http://d2z1pcfp95dfwd.cloudfront.net",
+        "https://d2z1pcfp95dfwd.cloudfront.net.evil.example"
+    )) {
+        $corsDenied = Invoke-ApiRequest -Method OPTIONS -Path "/health" -Origin $untrustedOrigin `
+            -RequestedMethod POST -RequestedHeaders "authorization,content-type"
+        $deniedOrigin = Get-HeaderValue $corsDenied.Headers "Access-Control-Allow-Origin"
+        Add-Check "CORS rejects untrusted origin $untrustedOrigin" ([string]::IsNullOrWhiteSpace($deniedOrigin))
+    }
 
     $bootstrapSecretJson = aws secretsmanager get-secret-value --region $Region --secret-id bloodlink/prod/bootstrap --query SecretString --output text
     if ($LASTEXITCODE -ne 0) { throw "Could not load bootstrap configuration for live authentication checks." }

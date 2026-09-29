@@ -70,3 +70,15 @@ Describe "complete-aws-production-verification redaction" {
         { Assert-BloodLinkEvidenceRedacted '{"status":"PASS"}' } | Should Not Throw
     }
 }
+
+Describe "complete-aws-production-verification CORS target" {
+    It "uses the exact production frontend origin and tests denied variants" {
+        $contents = Get-Content -LiteralPath $scriptPath -Raw
+
+        $contents | Should Match 'https://d2z1pcfp95dfwd\.cloudfront\.net'
+        $contents | Should Match 'authorization,content-type'
+        $contents | Should Match 'https://d2z1pcfp95dfwd\.cloudfront\.net\.evil\.example'
+        $contents | Should Not Match 'placeholder\.invalid'
+        $contents | Should Not Match 'AllowAnyOrigin'
+    }
+}

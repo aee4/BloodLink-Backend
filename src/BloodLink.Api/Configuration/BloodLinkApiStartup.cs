@@ -96,7 +96,7 @@ public static class BloodLinkApiStartup
         });
         builder.Services.AddCors(options => options.AddPolicy("Frontend", policy => policy
             .WithOrigins(origins)
-            .WithMethods("GET", "POST", "PUT", "OPTIONS")
+            .WithMethods("GET", "POST", "PUT")
             .WithHeaders("Authorization", "Content-Type")));
         builder.Services.AddAuthentication(options =>
             {
