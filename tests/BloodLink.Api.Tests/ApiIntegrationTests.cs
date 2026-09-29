@@ -486,10 +486,66 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var result = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal((int)FacilityStatus.Approved, result.GetProperty("status").GetInt32());
+
+        using var login = await client.PostAsJsonAsync("/api/v1/auth/login", new
+        {
+            email = registration.adminEmail,
+            password = registration.adminPassword
+        });
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        var session = await login.Content.ReadFromJsonAsync<JsonElement>();
+        var accessToken = session.GetProperty("accessToken").GetString();
+        var refreshToken = session.GetProperty("refreshToken").GetString();
+        using var currentRequest = new HttpRequestMessage(HttpMethod.Get, "/api/v1/auth/me");
+        currentRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var current = await client.SendAsync(currentRequest);
+        Assert.Equal(HttpStatusCode.OK, current.StatusCode);
+        using var refreshed = await client.PostAsJsonAsync("/api/v1/auth/refresh", new { refreshToken });
+        Assert.Equal(HttpStatusCode.OK, refreshed.StatusCode);
+
         await using var db = fixture.CreateContext();
         var facility = await db.Facilities.SingleAsync(item => item.RegistrationNumber == registration.registrationNumber);
         Assert.Equal(FacilityStatus.Approved, facility.Status);
         Assert.Equal(Enum.GetValues<BloodType>().Length, await db.BloodInventory.CountAsync(item => item.FacilityId == facility.Id));
+    }
+
+    [Fact]
+    public async Task Concurrent_duplicate_facility_registration_returns_one_conflict_without_partial_rows()
+    {
+        using var client = fixture.Application.CreateClient();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var registration = new
+        {
+            name = $"Duplicate API Registration {suffix}",
+            facilityType = (int)FacilityType.Hospital,
+            registrationNumber = $"DUP-{suffix}",
+            region = "Greater Accra",
+            city = "Accra",
+            address = "API test address",
+            contactEmail = $"contact-{suffix}@api.test",
+            contactPhone = "0200000000",
+            adminFirstName = "Api",
+            adminLastName = "Admin",
+            adminEmail = $"admin-{suffix}@api.test",
+            adminPhoneNumber = "0200000001",
+            adminPassword = ApiDatabaseFixture.Password
+        };
+
+        var responses = await Task.WhenAll(Enumerable.Range(0, 2)
+            .Select(_ => client.PostAsJsonAsync("/api/v1/facilities/register", registration)));
+        using var first = responses[0];
+        using var second = responses[1];
+        Assert.Equal(1, responses.Count(response => response.StatusCode == HttpStatusCode.Created));
+        var duplicate = Assert.Single(responses, response => response.StatusCode != HttpStatusCode.Created);
+        Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
+        using var problem = JsonDocument.Parse(await duplicate.Content.ReadAsStringAsync());
+        Assert.Equal("state_conflict", problem.RootElement.GetProperty("code").GetString());
+
+        await using var db = fixture.CreateContext();
+        var facility = await db.Facilities.SingleAsync(item => item.RegistrationNumber == registration.registrationNumber);
+        var admin = await db.Users.SingleAsync(user => user.NormalizedEmail == registration.adminEmail.ToUpperInvariant());
+        Assert.Single(await db.UserRoles.Where(role => role.UserId == admin.Id).ToListAsync());
+        Assert.Single(await db.AuditLogs.Where(log => log.Action == "FacilityRegistered" && log.FacilityId == facility.Id).ToListAsync());
     }
 
     [Fact]

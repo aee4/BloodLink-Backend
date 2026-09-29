@@ -10,6 +10,7 @@ using BloodLink.Infrastructure.Services.Common;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
@@ -113,6 +114,12 @@ public sealed class FacilityService(
             await dbContext.SaveChangesAsync(cancellationToken);
             if (transaction is not null) await transaction.CommitAsync(cancellationToken);
         }
+        catch (DbUpdateException exception) when (IsUniqueKeyConflict(exception))
+        {
+            if (transaction is not null) await transaction.RollbackAsync(CancellationToken.None);
+            throw new BloodLink.Domain.Exceptions.BusinessRuleViolationException(
+                "A facility or administrator account with these details already exists.");
+        }
         catch
         {
             if (transaction is not null) await transaction.RollbackAsync(CancellationToken.None);
@@ -124,6 +131,13 @@ public sealed class FacilityService(
         }
 
         return ToDto(facility);
+    }
+
+    private static bool IsUniqueKeyConflict(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+            if (current is SqlException { Number: 2601 or 2627 }) return true;
+        return false;
     }
 
     public async Task<FacilityDto?> GetFacilityAsync(Guid facilityId, CancellationToken cancellationToken = default)
