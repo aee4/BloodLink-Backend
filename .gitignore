@@ -33,6 +33,7 @@ launchSettings.json
 # Build and publish output
 artifacts/
 publish/
+.aws-sam/
 *.log
 
 # OS/editor noise

@@ -10,6 +10,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Amazon.Lambda.AspNetCoreServer.Hosting" Version="2.2.1" />
+    <PackageReference Include="AWSSDK.SecretsManager" Version="4.0.100.14" />
     <ProjectReference Include="..\BloodLink.Application\BloodLink.Application.csproj" />
     <ProjectReference Include="..\BloodLink.Infrastructure\BloodLink.Infrastructure.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.19" />

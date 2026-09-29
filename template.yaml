@@ -1,0 +1,307 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: BloodLink backend production API on API Gateway HTTP API, Lambda, and private RDS SQL Server.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC that contains the bloodlink-db RDS instance.
+  LambdaSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two private or database-reachable subnets from the RDS VPC.
+  RdsSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Existing security group attached to bloodlink-db.
+  DatabaseSecretName:
+    Type: String
+    Default: bloodlink/prod/database
+  AuthenticationSecretName:
+    Type: String
+    Default: bloodlink/prod/authentication
+  BootstrapSecretName:
+    Type: String
+    Default: bloodlink/prod/bootstrap
+  CorsOrigin:
+    Type: String
+    Default: https://placeholder.invalid
+    AllowedPattern: '^https://[^*]+$'
+
+Globals:
+  Function:
+    Runtime: dotnet8
+    Architectures:
+      - x86_64
+    MemorySize: 1024
+    Timeout: 30
+    VpcConfig:
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      SubnetIds: !Ref LambdaSubnetIds
+    Environment:
+      Variables:
+        ASPNETCORE_ENVIRONMENT: Production
+        BloodLink__DatabaseInitialization__Enabled: 'false'
+        BloodLink__FacilityRegistration__AutoApproveInDevelopment: 'false'
+        Api__AllowedOrigins__0: !Ref CorsOrigin
+    Tags:
+      Project: BloodLink
+      Environment: SchoolDemo
+      ManagedBy: Codex
+      Owner: aee4
+
+Resources:
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref CorsOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - OPTIONS
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+      Tags:
+        Project: BloodLink
+        Environment: SchoolDemo
+        ManagedBy: Codex
+        Owner: aee4
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BloodLink backend Lambda access to private SQL Server.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Project
+          Value: BloodLink
+        - Key: Environment
+          Value: SchoolDemo
+        - Key: ManagedBy
+          Value: Codex
+        - Key: Owner
+          Value: aee4
+
+  SecretsManagerEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS access to the BloodLink Secrets Manager VPC endpoint.
+      VpcId: !Ref VpcId
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Project
+          Value: BloodLink
+        - Key: Environment
+          Value: SchoolDemo
+        - Key: ManagedBy
+          Value: Codex
+        - Key: Owner
+          Value: aee4
+
+  LambdaToSecretsManagerEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref SecretsManagerEndpointSecurityGroup
+
+  LambdaToRdsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1433
+      ToPort: 1433
+      DestinationSecurityGroupId: !Ref RdsSecurityGroupId
+
+  SecretsManagerEndpointIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecretsManagerEndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  SecretsManagerVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref LambdaSubnetIds
+      SecurityGroupIds:
+        - !Ref SecretsManagerEndpointSecurityGroup
+      Tags:
+        - Key: Project
+          Value: BloodLink
+        - Key: Environment
+          Value: SchoolDemo
+        - Key: ManagedBy
+          Value: Codex
+        - Key: Owner
+          Value: aee4
+
+  RdsSqlIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: BloodLink Lambda SQL Server access.
+      GroupId: !Ref RdsSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  ApiFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: ReadBloodLinkApiSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DatabaseSecretName}-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AuthenticationSecretName}-*
+      Tags:
+        - Key: Project
+          Value: BloodLink
+        - Key: Environment
+          Value: SchoolDemo
+        - Key: ManagedBy
+          Value: Codex
+        - Key: Owner
+          Value: aee4
+
+  MigratorFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: ReadBloodLinkMigrationSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DatabaseSecretName}-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AuthenticationSecretName}-*
+      Tags:
+        - Key: Project
+          Value: BloodLink
+        - Key: Environment
+          Value: SchoolDemo
+        - Key: ManagedBy
+          Value: Codex
+        - Key: Owner
+          Value: aee4
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/BloodLink.Api/
+      Handler: BloodLink.Api
+      Role: !GetAtt ApiFunctionRole.Arn
+      Environment:
+        Variables:
+          BloodLink__AwsSecrets__Names: !Sub ${DatabaseSecretName},${AuthenticationSecretName}
+      Events:
+        ProxyApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+        RootApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: ANY
+
+  MigratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/BloodLink.DatabaseMigrator/
+      Handler: BloodLink.DatabaseMigrator::BloodLink.DatabaseMigrator.Function::RunAsync
+      Role: !GetAtt MigratorFunctionRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          BloodLink__DatabaseInitialization__Enabled: 'true'
+          BloodLink__AwsSecrets__Names: !Sub ${DatabaseSecretName},${AuthenticationSecretName}
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiFunction}
+      RetentionInDays: 14
+      Tags:
+        - Key: Project
+          Value: BloodLink
+        - Key: Environment
+          Value: SchoolDemo
+        - Key: ManagedBy
+          Value: Codex
+        - Key: Owner
+          Value: aee4
+
+  MigratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${MigratorFunction}
+      RetentionInDays: 14
+      Tags:
+        - Key: Project
+          Value: BloodLink
+        - Key: Environment
+          Value: SchoolDemo
+        - Key: ManagedBy
+          Value: Codex
+        - Key: Owner
+          Value: aee4
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway HTTPS base URL.
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  LambdaSecurityGroupId:
+    Description: Security group used by the API and migrator Lambdas.
+    Value: !Ref LambdaSecurityGroup
+  MigratorFunctionName:
+    Description: Private Lambda function name used for EF migrations and bootstrap.
+    Value: !Ref MigratorFunction
