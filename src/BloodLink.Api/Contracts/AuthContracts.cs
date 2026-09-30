@@ -13,7 +13,7 @@ public sealed record ApiUserResponse(string Id, string Email, string FirstName, 
 
 public sealed record RegisterFacilityBody(
     [Required, StringLength(200)] string Name,
-    FacilityType FacilityType,
+    [Required, EnumDataType(typeof(FacilityType))] FacilityType? FacilityType,
     [Required, StringLength(100)] string RegistrationNumber,
     [Required, StringLength(100)] string Region,
     [Required, StringLength(100)] string City,
@@ -26,7 +26,7 @@ public sealed record RegisterFacilityBody(
     [Required, StringLength(30)] string AdminPhoneNumber,
     [Required, MinLength(8), StringLength(256)] string AdminPassword)
 {
-    public BloodLink.Application.DTOs.RegisterFacilityRequest ToRequest() => new(Name, FacilityType, RegistrationNumber,
+    public BloodLink.Application.DTOs.RegisterFacilityRequest ToRequest() => new(Name, FacilityType!.Value, RegistrationNumber,
         Region, City, Address, ContactEmail, ContactPhone, AdminFirstName, AdminLastName, AdminEmail, AdminPhoneNumber, AdminPassword);
 }
 

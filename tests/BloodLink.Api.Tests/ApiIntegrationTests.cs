@@ -520,6 +520,112 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
     }
 
     [Fact]
+    public async Task Registration_validation_is_field_specific_and_does_not_create_partial_records()
+    {
+        using var client = fixture.Application.CreateClient();
+        await using var db = fixture.CreateContext();
+        var facilityCount = await db.Facilities.CountAsync();
+        var userCount = await db.Users.CountAsync();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        Dictionary<string, object?> ValidRequest() => new()
+        {
+            ["name"] = $"Validation API {suffix}",
+            ["facilityType"] = (int)FacilityType.Hospital,
+            ["registrationNumber"] = $"VAL-{suffix}",
+            ["region"] = "Greater Accra",
+            ["city"] = "Accra",
+            ["address"] = "Validation test address",
+            ["contactEmail"] = $"contact-{suffix}@api.test",
+            ["contactPhone"] = "0200000000",
+            ["adminFirstName"] = "Validation",
+            ["adminLastName"] = "Admin",
+            ["adminEmail"] = $"admin-{suffix}@api.test",
+            ["adminPhoneNumber"] = "0200000001",
+            ["adminPassword"] = ApiDatabaseFixture.Password
+        };
+
+        var invalidRequests = new (string Field, Action<Dictionary<string, object?>> Mutate)[]
+        {
+            ("facilityType", body => body.Remove("facilityType")),
+            ("adminPhoneNumber", body => body["adminPhoneNumber"] = new string('1', 31)),
+            ("adminEmail", body => body["adminEmail"] = "invalid-email")
+        };
+        foreach (var (field, mutate) in invalidRequests)
+        {
+            var request = ValidRequest();
+            mutate(request);
+            using var response = await client.PostAsJsonAsync("/api/v1/facilities/register", request);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Contains(problem.RootElement.GetProperty("errors").EnumerateObject(),
+                error => string.Equals(error.Name, field, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var weakPassword = ValidRequest();
+        weakPassword["adminPassword"] = "weakpass";
+        using (var response = await client.PostAsJsonAsync("/api/v1/facilities/register", weakPassword))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal("validation_error", problem.RootElement.GetProperty("code").GetString());
+        }
+
+        Assert.Equal(facilityCount, await db.Facilities.CountAsync());
+        Assert.Equal(userCount, await db.Users.CountAsync());
+    }
+
+    [Fact]
+    public async Task Staff_validation_is_field_specific_and_valid_creation_persists_role_and_membership()
+    {
+        using var client = await fixture.AuthenticatedClientAsync(fixture.AdminEmail);
+        await using var db = fixture.CreateContext();
+        var userCount = await db.Users.CountAsync();
+        var staffCount = await db.FacilityStaff.CountAsync();
+        var valid = new Dictionary<string, object?>
+        {
+            ["firstName"] = "Local",
+            ["lastName"] = "Staff",
+            ["email"] = $"local-staff-{Guid.NewGuid():N}@api.test",
+            ["phoneNumber"] = "0200000002",
+            ["password"] = ApiDatabaseFixture.Password
+        };
+
+        foreach (var (field, value) in new[]
+        {
+            ("email", "invalid-email"),
+            ("phoneNumber", new string('1', 31))
+        })
+        {
+            var request = new Dictionary<string, object?>(valid) { [field] = value };
+            using var response = await client.PostAsJsonAsync("/api/v1/staff", request);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Contains(problem.RootElement.GetProperty("errors").EnumerateObject(),
+                error => string.Equals(error.Name, field, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var weakPassword = new Dictionary<string, object?>(valid) { ["password"] = "weakpass" };
+        using (var response = await client.PostAsJsonAsync("/api/v1/staff", weakPassword))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal("validation_error", problem.RootElement.GetProperty("code").GetString());
+        }
+
+        using var created = await client.PostAsJsonAsync("/api/v1/staff", valid);
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        using var body = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var staffId = body.RootElement.GetProperty("userId").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(staffId));
+        Assert.Equal(userCount + 1, await db.Users.CountAsync());
+        Assert.Equal(staffCount + 1, await db.FacilityStaff.CountAsync());
+        var staffRoleId = await db.Roles.Where(candidate => candidate.Name == RoleNames.FacilityStaff)
+            .Select(candidate => candidate.Id).SingleAsync();
+        Assert.Contains(await db.UserRoles.Where(role => role.UserId == staffId).ToListAsync(),
+            role => role.RoleId == staffRoleId);
+    }
+
+    [Fact]
     public async Task Concurrent_duplicate_facility_registration_returns_one_conflict_without_partial_rows()
     {
         using var client = fixture.Application.CreateClient();
