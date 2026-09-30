@@ -18,23 +18,17 @@ public sealed class DashboardService(
     public async Task<SystemDashboardDto> GetSystemAdminDashboardAsync(CancellationToken cancellationToken = default)
     {
         ServiceGuards.RequireSystemAdmin(currentUser);
-        var pending = await dbContext.Facilities.AsNoTracking()
-            .Where(facility => facility.Status == FacilityStatus.Pending)
-            .OrderBy(facility => facility.CreatedAtUtc).ThenBy(facility => facility.Id)
-            .Select(facility => new DashboardFacilityItemDto(facility.Id, facility.Name, facility.City, facility.Region, facility.CreatedAtUtc))
-            .Take(6).ToListAsync(cancellationToken);
         var activity = await dbContext.AuditLogs.AsNoTracking()
             .OrderByDescending(log => log.CreatedAtUtc).ThenBy(log => log.Id)
             .Select(log => new DashboardActivityDto(log.Action, log.Summary, log.CreatedAtUtc, log.EntityType, log.EntityId))
             .Take(8).ToListAsync(cancellationToken);
 
         return new SystemDashboardDto(
-            await dbContext.Facilities.CountAsync(facility => facility.Status == FacilityStatus.Pending, cancellationToken),
             await dbContext.Facilities.CountAsync(facility => facility.Status == FacilityStatus.Approved, cancellationToken),
-            await dbContext.Facilities.CountAsync(facility => facility.Status == FacilityStatus.Suspended, cancellationToken))
+            await dbContext.Facilities.CountAsync(facility => facility.Status == FacilityStatus.Suspended, cancellationToken),
+            await dbContext.Facilities.CountAsync(cancellationToken))
         {
             ActiveRequests = await dbContext.BloodRequests.CountAsync(request => ActiveRequestStatuses.Contains(request.Status), cancellationToken),
-            PendingReviews = pending,
             RecentActivity = activity
         };
     }

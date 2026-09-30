@@ -7,7 +7,6 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace BloodLink.Infrastructure.Data.Seed;
@@ -17,8 +16,7 @@ public sealed class DatabaseInitializer(
     RoleManager<IdentityRole> roleManager,
     UserManager<ApplicationUser> userManager,
     IConfiguration configuration,
-    ILogger<DatabaseInitializer> logger,
-    IHostEnvironment? environment = null)
+    ILogger<DatabaseInitializer> logger)
 {
     private static readonly string[] RoleNamesToSeed =
     [
@@ -31,69 +29,6 @@ public sealed class DatabaseInitializer(
     {
         await EnsureRolesAsync();
         await BootstrapSystemAdminAsync(cancellationToken);
-        await AutoApprovePendingFacilitiesAsync(cancellationToken);
-    }
-
-    private async Task AutoApprovePendingFacilitiesAsync(CancellationToken cancellationToken)
-    {
-        if (environment?.IsDevelopment() != true
-            || !configuration.GetValue<bool>("BloodLink:FacilityRegistration:AutoApproveInDevelopment"))
-        {
-            return;
-        }
-
-        IDbContextTransaction? transaction = dbContext.Database.IsRelational()
-            ? await dbContext.Database.BeginTransactionAsync(cancellationToken)
-            : null;
-        try
-        {
-            var pendingFacilities = await dbContext.Facilities
-                .Where(facility => facility.Status == FacilityStatus.Pending)
-                .ToListAsync(cancellationToken);
-            if (pendingFacilities.Count == 0)
-            {
-                if (transaction is not null) await transaction.CommitAsync(cancellationToken);
-                return;
-            }
-
-            var nowUtc = DateTime.UtcNow;
-            foreach (var facility in pendingFacilities)
-            {
-                facility.Status = FacilityStatus.Approved;
-                facility.ApprovedAtUtc = nowUtc;
-                await InventoryInitializer.EnsureFacilityInventoryAsync(dbContext, facility.Id, nowUtc, cancellationToken);
-                var alreadyAudited = await dbContext.AuditLogs.AnyAsync(
-                    audit => audit.Action == "FacilityAutoApprovedInDevelopment"
-                        && audit.EntityType == nameof(Facility)
-                        && audit.EntityId == facility.Id,
-                    cancellationToken);
-                if (!alreadyAudited)
-                {
-                    dbContext.AuditLogs.Add(new AuditLog
-                    {
-                        ActorUserId = null,
-                        Action = "FacilityAutoApprovedInDevelopment",
-                        EntityType = nameof(Facility),
-                        EntityId = facility.Id,
-                        FacilityId = facility.Id,
-                        Summary = "Pending facility auto-approved by the Development startup policy.",
-                        CreatedAtUtc = nowUtc
-                    });
-                }
-            }
-
-            await dbContext.SaveChangesAsync(cancellationToken);
-            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
-        }
-        catch
-        {
-            if (transaction is not null) await transaction.RollbackAsync(CancellationToken.None);
-            throw;
-        }
-        finally
-        {
-            if (transaction is not null) await transaction.DisposeAsync();
-        }
     }
 
     public async Task EnsureRolesAsync()

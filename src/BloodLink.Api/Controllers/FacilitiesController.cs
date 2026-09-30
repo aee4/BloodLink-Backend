@@ -45,31 +45,17 @@ public sealed class FacilitiesController(IFacilityService facilities, ICurrentUs
         return facility is null ? NotFound() : Ok(facility);
     }
 
-    [Authorize(Policy = AuthorizationPolicies.RequireSystemAdmin), HttpPost("system/facilities/{id:guid}/approve"), ProducesResponseType(StatusCodes.Status204NoContent)]
-    public async Task<IActionResult> Approve(Guid id, CancellationToken cancellationToken)
-    {
-        await facilities.ApproveAsync(new FacilityDecisionRequest(id, null), cancellationToken);
-        return NoContent();
-    }
-
-    [Authorize(Policy = AuthorizationPolicies.RequireSystemAdmin), HttpPost("system/facilities/{id:guid}/reject"), ProducesResponseType(StatusCodes.Status204NoContent)]
-    public async Task<IActionResult> Reject(Guid id, DecisionBody body, CancellationToken cancellationToken)
-    {
-        await facilities.RejectAsync(new FacilityDecisionRequest(id, body.Reason), cancellationToken);
-        return NoContent();
-    }
-
     [Authorize(Policy = AuthorizationPolicies.RequireSystemAdmin), HttpPost("system/facilities/{id:guid}/suspend"), ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Suspend(Guid id, DecisionBody body, CancellationToken cancellationToken)
     {
-        await facilities.SuspendAsync(new FacilityDecisionRequest(id, body.Reason), cancellationToken);
+        await facilities.SuspendAsync(new FacilityLifecycleRequest(id, body.Reason), cancellationToken);
         return NoContent();
     }
 
     [Authorize(Policy = AuthorizationPolicies.RequireSystemAdmin), HttpPost("system/facilities/{id:guid}/restore"), ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Restore(Guid id, CancellationToken cancellationToken)
     {
-        await facilities.RestoreAsync(new FacilityDecisionRequest(id, null), cancellationToken);
+        await facilities.RestoreAsync(new FacilityLifecycleRequest(id, null), cancellationToken);
         return NoContent();
     }
 }

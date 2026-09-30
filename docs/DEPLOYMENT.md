@@ -16,7 +16,7 @@ Set these through the deployment platform's environment or secret manager, never
 | `BloodLink__DatabaseInitialization__Enabled` | Optional idempotent role/bootstrap initialization. Production startup never applies EF migrations. |
 | `BloodLink__BootstrapAdmin__*` | Optional controlled initial SystemAdmin provisioning; supply through a secret manager and disable/remove after use. |
 
-Development defaults are in `src/BloodLink.Api/appsettings.Development.json`. `appsettings.Example.json` documents safe key names without secrets. Development auto-approval can be controlled with `BloodLink__FacilityRegistration__AutoApproveInDevelopment`; the service also checks the actual Development host environment, so Production registrations remain pending.
+Development defaults are in `src/BloodLink.Api/appsettings.Development.json`. `appsettings.Example.json` documents safe key names without secrets. New facility registrations activate automatically in every environment. Existing Pending records are not changed at startup; they remain restricted and require a separately reviewed operational decision.
 
 ## Release and network
 

@@ -18,7 +18,7 @@ The blueprint's canonical model uses `BloodNeed` for internal needs and `BloodRe
 - Relationships: has users, staff records, inventory, needs, sent requests, received requests, audit records.
 - Owning team: Backend Developer 1, with PM contract review.
 - Validation responsibility: Facility service and EF unique constraints.
-- Security/privacy: operational access requires Approved status.
+- Security/privacy: operational access requires Approved status. New registrations use this state immediately; Pending, Rejected, and Suspended enum values remain persisted for legacy compatibility, and existing Pending records are not promoted automatically.
 
 ## FacilityStaff
 

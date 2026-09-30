@@ -14,7 +14,7 @@ Mutations preserve the established SQL Server transaction boundaries. Inventory,
 
 ## Host lifecycle
 
-The API host registers Infrastructure, Identity, authorization policies, application services, and SQL-backed health checks. Development initializes migrations when `BloodLink:DatabaseInitialization:Enabled` is true, ensures canonical roles, and reconciles eligible Pending facilities. Production never runs EF migrations automatically; optional initialization can ensure roles/bootstrap state without changing facility approval policy. Development Swagger is enabled; production OpenAPI requires explicit configuration. Production requires HTTPS, an explicit HTTPS CORS allowlist, a stable signing secret, and SQL Server configuration.
+The API host registers Infrastructure, Identity, authorization policies, application services, and SQL-backed health checks. Development initializes migrations when `BloodLink:DatabaseInitialization:Enabled` is true and ensures canonical roles. Startup never changes existing facility states. Production never runs EF migrations automatically; optional initialization can ensure roles/bootstrap state without changing facility state. Development Swagger is enabled; production OpenAPI requires explicit configuration. Production requires HTTPS, an explicit HTTPS CORS allowlist, a stable signing secret, and SQL Server configuration.
 
 ## Deferred boundaries
 

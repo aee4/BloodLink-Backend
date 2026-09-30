@@ -57,6 +57,8 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
             "/api/v1/notifications/read-all", "/api/v1/dashboard"
         };
         foreach (var path in expectedPaths) Assert.True(paths.TryGetProperty(path, out _), $"Missing OpenAPI path {path}.");
+        Assert.False(paths.TryGetProperty("/api/v1/system/facilities/{id}/approve", out _));
+        Assert.False(paths.TryGetProperty("/api/v1/system/facilities/{id}/reject", out _));
         Assert.False(paths.TryGetProperty("/api/v1/auth/reset-password", out _));
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/inventory")).StatusCode);
@@ -462,7 +464,7 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
     }
 
     [Fact]
-    public async Task Development_registration_is_auto_approved_and_persisted()
+    public async Task Registration_is_active_and_sign_in_session_restores_immediately()
     {
         using var client = fixture.Application.CreateClient();
         var suffix = Guid.NewGuid().ToString("N")[..8];
@@ -507,6 +509,14 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
         var facility = await db.Facilities.SingleAsync(item => item.RegistrationNumber == registration.registrationNumber);
         Assert.Equal(FacilityStatus.Approved, facility.Status);
         Assert.Equal(Enum.GetValues<BloodType>().Length, await db.BloodInventory.CountAsync(item => item.FacilityId == facility.Id));
+        var admin = await db.Users.SingleAsync(item => item.Email == registration.adminEmail);
+        Assert.True(admin.IsActive);
+        var role = await db.Roles.Where(item => item.Name == RoleNames.FacilityAdmin).Select(item => item.Id).SingleAsync();
+        Assert.Single(await db.UserRoles.Where(item => item.UserId == admin.Id && item.RoleId == role).ToListAsync());
+        Assert.Null(facility.ApprovedByUserId);
+        var audit = Assert.Single(await db.AuditLogs.Where(item => item.Action == "FacilityRegistered" && item.FacilityId == facility.Id).ToListAsync());
+        Assert.Equal(admin.Id, audit.ActorUserId);
+        Assert.Contains("activated automatically", audit.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -549,7 +559,7 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
     }
 
     [Fact]
-    public async Task Production_registration_remains_pending_without_inventory()
+    public async Task Production_registration_login_suspension_restoration_and_role_enforcement_work()
     {
         var previousKey = Environment.GetEnvironmentVariable("Api__Tokens__SigningKey");
         var previousOrigins = Environment.GetEnvironmentVariable("Api__AllowedOrigins__0");
@@ -579,11 +589,53 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
             using var response = await client.PostAsJsonAsync("/api/v1/facilities/register", registration);
             Assert.Equal(HttpStatusCode.Created, response.StatusCode);
             var result = await response.Content.ReadFromJsonAsync<JsonElement>();
-            Assert.Equal((int)FacilityStatus.Pending, result.GetProperty("status").GetInt32());
+            Assert.Equal((int)FacilityStatus.Approved, result.GetProperty("status").GetInt32());
             await using var db = fixture.CreateContext();
             var facility = await db.Facilities.SingleAsync(item => item.RegistrationNumber == registration.registrationNumber);
-            Assert.Equal(FacilityStatus.Pending, facility.Status);
-            Assert.Empty(await db.BloodInventory.Where(item => item.FacilityId == facility.Id).ToListAsync());
+            Assert.Equal(FacilityStatus.Approved, facility.Status);
+            Assert.Equal(Enum.GetValues<BloodType>().Length, await db.BloodInventory.CountAsync(item => item.FacilityId == facility.Id));
+
+            var ownerSession = await LoginAsync(client, registration.adminEmail);
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                "Bearer", ownerSession.GetProperty("accessToken").GetString());
+            using var me = await client.GetAsync("/api/v1/auth/me");
+            Assert.Equal(HttpStatusCode.OK, me.StatusCode);
+            using var ownFacility = await client.GetAsync("/api/v1/facilities/me");
+            Assert.Equal(HttpStatusCode.OK, ownFacility.StatusCode);
+            using var initialRefresh = await RefreshAsync(client, ownerSession.GetProperty("refreshToken").GetString()!);
+            Assert.Equal(HttpStatusCode.OK, initialRefresh.StatusCode);
+            using var refreshedSession = JsonDocument.Parse(await initialRefresh.Content.ReadAsStringAsync());
+            var currentRefreshToken = refreshedSession.RootElement.GetProperty("refreshToken").GetString()!;
+
+            using var facilityAdmin = await fixture.AuthenticatedClientAsync(fixture.AdminEmail);
+            using var facilityStaff = await fixture.AuthenticatedClientAsync(fixture.StaffEmail);
+            var facilityId = result.GetProperty("id").GetGuid();
+            using var adminDenied = await facilityAdmin.PostAsJsonAsync($"/api/v1/system/facilities/{facilityId}/suspend", new { reason = "authorization test" });
+            using var staffDenied = await facilityStaff.PostAsJsonAsync($"/api/v1/system/facilities/{facilityId}/suspend", new { reason = "authorization test" });
+            Assert.Equal(HttpStatusCode.Forbidden, adminDenied.StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, staffDenied.StatusCode);
+
+            using var systemAdmin = await fixture.AuthenticatedClientAsync(fixture.SystemAdminEmail);
+            using var suspended = await systemAdmin.PostAsJsonAsync($"/api/v1/system/facilities/{facilityId}/suspend", new { reason = "controlled lifecycle test" });
+            Assert.Equal(HttpStatusCode.NoContent, suspended.StatusCode);
+            using var blockedMe = await client.GetAsync("/api/v1/auth/me");
+            Assert.Equal(HttpStatusCode.Forbidden, blockedMe.StatusCode);
+            using var blockedRefresh = await RefreshAsync(client, currentRefreshToken);
+            Assert.Equal(HttpStatusCode.Unauthorized, blockedRefresh.StatusCode);
+
+            using var unsuspended = await systemAdmin.PostAsync($"/api/v1/system/facilities/{facilityId}/restore", null);
+            Assert.Equal(HttpStatusCode.NoContent, unsuspended.StatusCode);
+            using var restoredMe = await client.GetAsync("/api/v1/auth/me");
+            Assert.Equal(HttpStatusCode.OK, restoredMe.StatusCode);
+            using var restoredRefresh = await RefreshAsync(client, currentRefreshToken);
+            Assert.Equal(HttpStatusCode.OK, restoredRefresh.StatusCode);
+
+            using var restoreDeniedAdmin = await facilityAdmin.PostAsync($"/api/v1/system/facilities/{facilityId}/restore", null);
+            using var restoreDeniedStaff = await facilityStaff.PostAsync($"/api/v1/system/facilities/{facilityId}/restore", null);
+            Assert.Equal(HttpStatusCode.Forbidden, restoreDeniedAdmin.StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, restoreDeniedStaff.StatusCode);
+
+            Assert.Equal(FacilityStatus.Approved, (await db.Facilities.SingleAsync(item => item.Id == facilityId)).Status);
         }
         finally
         {
@@ -600,6 +652,7 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
     private string connectionString = string.Empty;
     public Guid FacilityId { get; private set; }
     public string AdminEmail { get; private set; } = string.Empty;
+    public string SystemAdminEmail { get; private set; } = string.Empty;
     public string StaffEmail { get; private set; } = string.Empty;
     public string StaffUserId { get; private set; } = string.Empty;
     public WebApplicationFactory<Program> Application { get; private set; } = null!;
@@ -653,6 +706,8 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
         });
         await dbContext.SaveChangesAsync();
         var users = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        SystemAdminEmail = $"system-{Guid.NewGuid():N}@api.test";
+        await AddUserAsync(users, SystemAdminEmail, RoleNames.SystemAdmin, null);
         AdminEmail = $"admin-{Guid.NewGuid():N}@api.test";
         var admin = await AddUserAsync(users, AdminEmail, RoleNames.FacilityAdmin, FacilityId);
         var staffEmail = $"staff-{Guid.NewGuid():N}@api.test";
@@ -670,7 +725,7 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
         await dbContext.SaveChangesAsync();
     }
 
-    private static async Task<ApplicationUser> AddUserAsync(UserManager<ApplicationUser> users, string email, string role, Guid facilityId)
+    private static async Task<ApplicationUser> AddUserAsync(UserManager<ApplicationUser> users, string email, string role, Guid? facilityId)
     {
         var user = new ApplicationUser
         {
@@ -750,7 +805,6 @@ public sealed class ApiDatabaseFixture : IAsyncLifetime
             {
                 ["ConnectionStrings:DefaultConnection"] = sqlConnection,
                 ["BloodLink:DatabaseInitialization:Enabled"] = "false",
-                ["BloodLink:FacilityRegistration:AutoApproveInDevelopment"] = "true",
                 ["Api:Tokens:SigningKey"] = "ApiTestKeyAtLeastThirtyTwoCharactersLongForHmacSigning!",
                 ["Api:AllowedOrigins:0"] = "https://d2z1pcfp95dfwd.cloudfront.net",
                 ["Api:AllowedOrigins:1"] = "https://localhost:7081",

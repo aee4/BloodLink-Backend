@@ -42,7 +42,6 @@ Globals:
       Variables:
         ASPNETCORE_ENVIRONMENT: Production
         BloodLink__DatabaseInitialization__Enabled: 'false'
-        BloodLink__FacilityRegistration__AutoApproveInDevelopment: 'false'
         Api__AllowedOrigins__0: !Ref CorsOrigin
     Tags:
       Project: BloodLink

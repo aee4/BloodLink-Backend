@@ -11,8 +11,6 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Data.SqlClient;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
 
 namespace BloodLink.Infrastructure.Services.Facilities;
 
@@ -20,13 +18,9 @@ public sealed class FacilityService(
     BloodLinkDbContext dbContext,
     ICurrentUserService currentUser,
     IPasswordHasher<ApplicationUser>? passwordHasher = null,
-    UserManager<ApplicationUser>? userManager = null,
-    IHostEnvironment? environment = null,
-    IConfiguration? configuration = null) : IFacilityService
+    UserManager<ApplicationUser>? userManager = null) : IFacilityService
 {
     private readonly IPasswordHasher<ApplicationUser> passwordHasher = passwordHasher ?? new PasswordHasher<ApplicationUser>();
-    private readonly bool autoApproveInDevelopment = environment?.IsDevelopment() == true
-        && configuration?.GetValue<bool>("BloodLink:FacilityRegistration:AutoApproveInDevelopment") == true;
 
     public async Task<FacilityDto> RegisterFacilityAsync(RegisterFacilityRequest request, CancellationToken cancellationToken = default)
     {
@@ -83,10 +77,10 @@ public sealed class FacilityService(
             Address = request.Address.Trim(),
             ContactEmail = request.ContactEmail.Trim(),
             ContactPhone = request.ContactPhone.Trim(),
-            Status = autoApproveInDevelopment ? FacilityStatus.Approved : FacilityStatus.Pending,
+            Status = FacilityStatus.Approved,
             CreatedByUserId = admin.Id,
             CreatedAtUtc = nowUtc,
-            ApprovedAtUtc = autoApproveInDevelopment ? nowUtc : null
+            ApprovedAtUtc = nowUtc
         };
 
         IDbContextTransaction? transaction = dbContext.Database.IsRelational()
@@ -95,19 +89,15 @@ public sealed class FacilityService(
         dbContext.Facilities.Add(facility);
         dbContext.Users.Add(admin);
         dbContext.UserRoles.Add(new IdentityUserRole<string> { UserId = admin.Id, RoleId = adminRoleId });
-        AddAudit("FacilityRegistered", nameof(Facility), facility.Id, facility.Id, "Facility registration submitted.", nowUtc, actorUserId: admin.Id);
-        if (autoApproveInDevelopment)
-        {
-            await InventoryInitializer.EnsureFacilityInventoryAsync(dbContext, facility.Id, nowUtc, cancellationToken);
-            AddAudit(
-                "FacilityAutoApprovedInDevelopment",
-                nameof(Facility),
-                facility.Id,
-                facility.Id,
-                "Facility was automatically approved by the Development registration policy.",
-                nowUtc,
-                actorUserId: null);
-        }
+        await InventoryInitializer.EnsureFacilityInventoryAsync(dbContext, facility.Id, nowUtc, cancellationToken);
+        AddAudit(
+            "FacilityRegistered",
+            nameof(Facility),
+            facility.Id,
+            facility.Id,
+            "Facility and initial administrator registered; facility activated automatically.",
+            nowUtc,
+            actorUserId: admin.Id);
 
         try
         {
@@ -167,11 +157,6 @@ public sealed class FacilityService(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public Task<PagedResult<FacilityDto>> ListPendingAsync(PageRequest page, CancellationToken cancellationToken = default)
-    {
-        return ListFacilitiesAsync(new FacilityQueryRequest(FacilityStatus.Pending), page, cancellationToken);
-    }
-
     public async Task<PagedResult<FacilityDto>> ListFacilitiesAsync(
         FacilityQueryRequest request,
         PageRequest page,
@@ -200,20 +185,14 @@ public sealed class FacilityService(
         return new PagedResult<FacilityDto>(items, page.SafeNumber, size, hasNext);
     }
 
-    public Task ApproveAsync(FacilityDecisionRequest request, CancellationToken cancellationToken = default) =>
-        ApplySystemDecisionAsync(request, FacilityStatus.Pending, FacilityStatus.Approved, requiresReason: false, cancellationToken);
+    public Task SuspendAsync(FacilityLifecycleRequest request, CancellationToken cancellationToken = default) =>
+        ApplySystemStatusChangeAsync(request, FacilityStatus.Approved, FacilityStatus.Suspended, requiresReason: true, cancellationToken);
 
-    public Task RejectAsync(FacilityDecisionRequest request, CancellationToken cancellationToken = default) =>
-        ApplySystemDecisionAsync(request, FacilityStatus.Pending, FacilityStatus.Rejected, requiresReason: true, cancellationToken);
+    public Task RestoreAsync(FacilityLifecycleRequest request, CancellationToken cancellationToken = default) =>
+        ApplySystemStatusChangeAsync(request, FacilityStatus.Suspended, FacilityStatus.Approved, requiresReason: false, cancellationToken);
 
-    public Task SuspendAsync(FacilityDecisionRequest request, CancellationToken cancellationToken = default) =>
-        ApplySystemDecisionAsync(request, FacilityStatus.Approved, FacilityStatus.Suspended, requiresReason: true, cancellationToken);
-
-    public Task RestoreAsync(FacilityDecisionRequest request, CancellationToken cancellationToken = default) =>
-        ApplySystemDecisionAsync(request, FacilityStatus.Suspended, FacilityStatus.Approved, requiresReason: false, cancellationToken);
-
-    private async Task ApplySystemDecisionAsync(
-        FacilityDecisionRequest request,
+    private async Task ApplySystemStatusChangeAsync(
+        FacilityLifecycleRequest request,
         FacilityStatus expectedStatus,
         FacilityStatus nextStatus,
         bool requiresReason,
@@ -238,7 +217,7 @@ public sealed class FacilityService(
 
         var nowUtc = DateTime.UtcNow;
         facility.Status = nextStatus;
-        facility.RejectionReason = nextStatus is FacilityStatus.Rejected or FacilityStatus.Suspended
+        facility.RejectionReason = nextStatus == FacilityStatus.Suspended
             ? request.Reason!.Trim()
             : null;
 
@@ -247,16 +226,13 @@ public sealed class FacilityService(
             facility.ApprovedByUserId = currentUser.UserId;
             facility.ApprovedAtUtc = nowUtc;
             await InventoryInitializer.EnsureFacilityInventoryAsync(dbContext, facility.Id, nowUtc, cancellationToken);
-            await ActivateFacilityAdminsAsync(facility.Id, cancellationToken);
         }
 
-        var recipientIds = nextStatus == FacilityStatus.Rejected
-            ? await SetFacilityUsersActiveAsync(facility.Id, isActive: false, cancellationToken)
-            : await GetFacilityUserIdsAsync(facility.Id, cancellationToken);
+        var recipientIds = await GetFacilityUserIdsAsync(facility.Id, cancellationToken);
 
         AddFacilityDecisionNotifications(facility.Id, recipientIds, nextStatus, nowUtc);
         AddAudit(
-            $"Facility{nextStatus}",
+            nextStatus == FacilityStatus.Suspended ? "FacilitySuspended" : "FacilityRestored",
             nameof(Facility),
             facility.Id,
             facility.Id,
@@ -264,36 +240,6 @@ public sealed class FacilityService(
             nowUtc);
 
         await dbContext.SaveChangesAsync(cancellationToken);
-    }
-
-    private async Task ActivateFacilityAdminsAsync(Guid facilityId, CancellationToken cancellationToken)
-    {
-        var adminRoleId = await GetRoleIdAsync(RoleNames.FacilityAdmin, cancellationToken);
-        var admins = await (from user in dbContext.Users
-                            join userRole in dbContext.UserRoles on user.Id equals userRole.UserId
-                            where user.FacilityId == facilityId && userRole.RoleId == adminRoleId
-                            select user)
-            .ToListAsync(cancellationToken);
-
-        foreach (var admin in admins)
-        {
-            admin.IsActive = true;
-        }
-    }
-
-    private async Task<IReadOnlyList<string>> SetFacilityUsersActiveAsync(
-        Guid facilityId,
-        bool isActive,
-        CancellationToken cancellationToken)
-    {
-        var users = await dbContext.Users.Where(user => user.FacilityId == facilityId).ToListAsync(cancellationToken);
-
-        foreach (var user in users)
-        {
-            user.IsActive = isActive;
-        }
-
-        return users.Select(user => user.Id).ToArray();
     }
 
     private Task<List<string>> GetFacilityUserIdsAsync(Guid facilityId, CancellationToken cancellationToken) =>
@@ -312,7 +258,7 @@ public sealed class FacilityService(
             dbContext,
             recipientIds,
             NotificationType.FacilityDecision,
-            "Facility decision updated",
+            "Facility status updated",
             $"Your facility status is now {status}.",
             nameof(Facility),
             facilityId,

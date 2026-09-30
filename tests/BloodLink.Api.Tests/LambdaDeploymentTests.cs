@@ -77,7 +77,6 @@ public sealed class LambdaDeploymentTests
             ["Api:Tokens:SigningKey"] = "ApiTestKeyAtLeastThirtyTwoCharactersLongForHmacSigning!",
             ["Api:AllowedOrigins:0"] = origin,
             ["BloodLink:DatabaseInitialization:Enabled"] = "false",
-            ["BloodLink:FacilityRegistration:AutoApproveInDevelopment"] = "false",
             ["BloodLink:BootstrapAdmin:Enabled"] = "false"
         });
         return builder;

@@ -17,9 +17,9 @@ public sealed class DashboardServiceTests
 
         var dashboard = await service.GetSystemAdminDashboardAsync();
 
-        Assert.Equal(1, dashboard.PendingFacilities);
-        Assert.Equal(2, dashboard.ApprovedFacilities);
+        Assert.Equal(2, dashboard.ActiveFacilities);
         Assert.Equal(0, dashboard.SuspendedFacilities);
+        Assert.Equal(3, dashboard.TotalFacilities);
     }
 
     [Fact]

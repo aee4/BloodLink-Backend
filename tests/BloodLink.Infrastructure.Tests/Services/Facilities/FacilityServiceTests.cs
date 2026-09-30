@@ -12,15 +12,17 @@ namespace BloodLink.Infrastructure.Tests.Services.Facilities;
 public sealed class FacilityServiceTests
 {
     [Fact]
-    public async Task RegisterFacilityAsync_CreatesPendingFacilityAndSignInReadyInitialAdmin()
+    public async Task RegisterFacilityAsync_CreatesApprovedFacilityAndSignInReadyInitialAdmin()
     {
         await using var dbContext = WorkflowTestSupport.CreateDbContext();
         var service = new FacilityService(dbContext, AnonymousUser());
 
         var result = await service.RegisterFacilityAsync(RegistrationRequest());
 
-        Assert.Equal(FacilityStatus.Pending, result.Status);
+        Assert.Equal(FacilityStatus.Approved, result.Status);
         var facility = Assert.Single(dbContext.Facilities.Where(item => item.RegistrationNumber == "REG-100"));
+        Assert.NotNull(facility.ApprovedAtUtc);
+        Assert.Null(facility.ApprovedByUserId);
         var admin = Assert.Single(dbContext.Users.Where(user => user.FacilityId == facility.Id));
         Assert.True(admin.IsActive);
         Assert.False(admin.MustChangePassword);
@@ -28,7 +30,11 @@ public sealed class FacilityServiceTests
             .VerifyHashedPassword(admin, admin.PasswordHash!, "ValidPass123") != Microsoft.AspNetCore.Identity.PasswordVerificationResult.Failed);
         Assert.Equal(admin.Id, facility.CreatedByUserId);
         Assert.Single(dbContext.UserRoles.Where(userRole => userRole.UserId == admin.Id && userRole.RoleId == RoleNames.FacilityAdmin));
-        Assert.Single(dbContext.AuditLogs.Where(log => log.Action == "FacilityRegistered" && log.FacilityId == facility.Id));
+        Assert.Equal(Enum.GetValues<BloodType>().Length, dbContext.BloodInventory.Count(item => item.FacilityId == facility.Id));
+        var audit = Assert.Single(dbContext.AuditLogs.Where(log => log.Action == "FacilityRegistered" && log.FacilityId == facility.Id));
+        Assert.Contains("activated automatically", audit.Summary, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(admin.Id, audit.ActorUserId);
+        Assert.DoesNotContain(dbContext.AuditLogs, log => log.Action.Contains("Approved", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -66,82 +72,8 @@ public sealed class FacilityServiceTests
         Assert.Empty(await dbContext.Users.ToListAsync());
         Assert.Empty(await dbContext.UserRoles.ToListAsync());
         Assert.Empty(await dbContext.AuditLogs.ToListAsync());
+        Assert.Empty(await dbContext.BloodInventory.ToListAsync());
         Assert.Empty(await dbContext.Facilities.Where(item => item.RegistrationNumber == "REG-100").ToListAsync());
-    }
-
-    [Fact]
-    public async Task ApproveAsync_SystemAdminApprovesPendingFacilityAndActivatesInitialAdmin()
-    {
-        await using var dbContext = WorkflowTestSupport.CreateDbContext();
-        var service = new FacilityService(dbContext, AnonymousUser());
-        var registered = await service.RegisterFacilityAsync(RegistrationRequest());
-        dbContext.BloodInventory.Add(new BloodInventory
-        {
-            Id = Guid.NewGuid(),
-            FacilityId = registered.Id,
-            BloodType = BloodType.BPositive,
-            TotalUnits = 7,
-            ReservedUnits = 2,
-            LowStockThreshold = 4,
-            UpdatedAtUtc = DateTime.UtcNow,
-            RowVersion = [3, 2, 1]
-        });
-        await dbContext.SaveChangesAsync();
-        var systemService = new FacilityService(dbContext, SystemAdminUser("system"));
-
-        await systemService.ApproveAsync(new FacilityDecisionRequest(registered.Id, null));
-
-        var facility = dbContext.Facilities.Single(item => item.Id == registered.Id);
-        var admin = dbContext.Users.Single(user => user.FacilityId == registered.Id);
-        Assert.Equal(FacilityStatus.Approved, facility.Status);
-        Assert.Equal("system", facility.ApprovedByUserId);
-        Assert.True(admin.IsActive);
-        var inventory = dbContext.BloodInventory.Where(item => item.FacilityId == registered.Id).ToList();
-        Assert.Equal(Enum.GetValues<BloodType>().Length, inventory.Count);
-        Assert.All(inventory.Where(item => item.BloodType != BloodType.BPositive), item =>
-            Assert.Equal((0, 0, 10), (item.TotalUnits, item.ReservedUnits, item.LowStockThreshold)));
-        var preserved = inventory.Single(item => item.BloodType == BloodType.BPositive);
-        Assert.Equal((7, 2, 4), (preserved.TotalUnits, preserved.ReservedUnits, preserved.LowStockThreshold));
-        Assert.Equal(new byte[] { 3, 2, 1 }, preserved.RowVersion);
-        Assert.Single(dbContext.Notifications.Where(notification => notification.RecipientUserId == admin.Id && notification.NotificationType == NotificationType.FacilityDecision));
-    }
-
-    [Fact]
-    public async Task RejectAsync_RequiresSystemAdminReasonAndLeavesAdminInactive()
-    {
-        await using var dbContext = WorkflowTestSupport.CreateDbContext();
-        var service = new FacilityService(dbContext, AnonymousUser());
-        var registered = await service.RegisterFacilityAsync(RegistrationRequest());
-        var systemService = new FacilityService(dbContext, SystemAdminUser("system"));
-
-        await Assert.ThrowsAsync<ArgumentException>(() =>
-            systemService.RejectAsync(new FacilityDecisionRequest(registered.Id, " ")));
-
-        await systemService.RejectAsync(new FacilityDecisionRequest(registered.Id, "Missing accreditation proof"));
-
-        var facility = dbContext.Facilities.Single(item => item.Id == registered.Id);
-        var admin = dbContext.Users.Single(user => user.FacilityId == registered.Id);
-        Assert.Equal(FacilityStatus.Rejected, facility.Status);
-        Assert.Equal("Missing accreditation proof", facility.RejectionReason);
-        Assert.False(admin.IsActive);
-    }
-
-    [Fact]
-    public async Task FacilityDecisions_RejectNonSystemAdminAndInvalidState()
-    {
-        await using var dbContext = WorkflowTestSupport.CreateDbContext();
-        var service = new FacilityService(dbContext, AnonymousUser());
-        var registered = await service.RegisterFacilityAsync(RegistrationRequest());
-        var facilityAdminService = new FacilityService(dbContext, FacilityAdminUser("admin", registered.Id));
-
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-            facilityAdminService.ApproveAsync(new FacilityDecisionRequest(registered.Id, null)));
-
-        var systemService = new FacilityService(dbContext, SystemAdminUser("system"));
-        await systemService.ApproveAsync(new FacilityDecisionRequest(registered.Id, null));
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            systemService.RejectAsync(new FacilityDecisionRequest(registered.Id, "Too late")));
     }
 
     [Fact]
@@ -150,17 +82,19 @@ public sealed class FacilityServiceTests
         await using var dbContext = WorkflowTestSupport.CreateDbContext();
         var service = new FacilityService(dbContext, SystemAdminUser("system"));
 
-        await service.SuspendAsync(new FacilityDecisionRequest(WorkflowTestSupport.FacilityAId, "Compliance hold"));
+        await service.SuspendAsync(new FacilityLifecycleRequest(WorkflowTestSupport.FacilityAId, "Compliance hold"));
 
         var suspended = dbContext.Facilities.Single(item => item.Id == WorkflowTestSupport.FacilityAId);
         Assert.Equal(FacilityStatus.Suspended, suspended.Status);
         Assert.Equal("Compliance hold", suspended.RejectionReason);
 
-        await service.RestoreAsync(new FacilityDecisionRequest(WorkflowTestSupport.FacilityAId, null));
+        await service.RestoreAsync(new FacilityLifecycleRequest(WorkflowTestSupport.FacilityAId, null));
 
         var restored = dbContext.Facilities.Single(item => item.Id == WorkflowTestSupport.FacilityAId);
         Assert.Equal(FacilityStatus.Approved, restored.Status);
         Assert.Null(restored.RejectionReason);
+        Assert.Contains(dbContext.AuditLogs, log => log.Action == "FacilitySuspended" && log.ActorUserId == "system");
+        Assert.Contains(dbContext.AuditLogs, log => log.Action == "FacilityRestored" && log.ActorUserId == "system");
     }
 
     [Fact]

@@ -23,7 +23,7 @@ For local setup, install the .NET 8 SDK and use the commands under [Configure An
 
 ## Configure And Run
 
-The Development profile defaults to a local `BloodLink_Backend_Development` LocalDB database, applies migrations, and initializes canonical roles. No email provider or password-reset credential is required. The signing key is generated ephemerally when no Development key is configured; it invalidates sessions when the process restarts. Development facility auto-approval is enabled by default. Production registration remains Pending.
+The Development profile defaults to a local `BloodLink_Backend_Development` LocalDB database, applies migrations, and initializes canonical roles. No email provider or password-reset credential is required. The signing key is generated ephemerally when no Development key is configured; it invalidates sessions when the process restarts. New facility registrations activate immediately in every environment, including the initial FacilityAdmin account and inventory. Existing Pending facilities remain restricted and are never promoted automatically at startup; any legacy records require a separately reviewed operational decision.
 
 ```powershell
 dotnet tool restore

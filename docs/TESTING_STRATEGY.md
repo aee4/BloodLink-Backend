@@ -10,7 +10,7 @@ Database and service integration tests should cover EF configuration, unique con
 
 ## Authorization Tests
 
-Security tests must cover anonymous access, wrong role, inactive users, pending/rejected/suspended facilities, and cross-facility ID tampering.
+Security tests must cover anonymous access, wrong role, inactive users, legacy pending/rejected/suspended facilities, and cross-facility ID tampering. Registration integration tests also verify immediate activation and that startup never promotes pre-existing Pending records.
 
 ## UI Tests
 

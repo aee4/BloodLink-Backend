@@ -6,4 +6,4 @@ Authenticate with `POST /auth/login`; retain the short-lived token in memory whe
 
 JSON enum values use the numeric values of the Domain enums. All timestamps ending in `Utc` must be UTC ISO-8601 values (for example, `2030-03-01T14:30:00Z`). `NeededByUtc` must include a UTC offset and be in the future. Clients should preserve and submit SQL row-version values as base64 where a mutation accepts one. A 409 indicates a concurrency or current-state conflict; reload before retrying. Private records may deliberately appear as 404.
 
-Facility registration returns a facility DTO and issues no session; sign in separately. Development may auto-approve registrations; production always requires SystemAdmin review. Password reset is unavailable. See [API contracts](API_CONTRACTS.md) for endpoint policies, scoping, statuses, and effects.
+Facility registration returns an active facility DTO and issues no session; sign in separately after registration. SystemAdmin can suspend or restore active facilities; legacy Pending records remain restricted. Password reset is unavailable. See [API contracts](API_CONTRACTS.md) for endpoint policies, scoping, statuses, and effects.

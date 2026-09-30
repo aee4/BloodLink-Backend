@@ -4,13 +4,10 @@ using BloodLink.Domain.Enums;
 using BloodLink.Infrastructure.Data;
 using BloodLink.Infrastructure.Data.Seed;
 using BloodLink.Infrastructure.Identity;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.FileProviders;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BloodLink.Infrastructure.Tests;
@@ -101,7 +98,7 @@ public sealed class DatabaseInitializerTests
     }
 
     [Fact]
-    public async Task Development_auto_approval_reconciles_only_pending_facilities_once_without_reactivating_users()
+    public async Task Startup_never_changes_existing_facility_status_or_user_activation()
     {
         await using var fixture = await Fixture.CreateAsync(new Dictionary<string, string?>
         {
@@ -135,53 +132,21 @@ public sealed class DatabaseInitializerTests
         await fixture.Context.SaveChangesAsync();
 
         await fixture.Initializer.InitializeAsync();
-        var automaticApprovalAt = Assert.NotNull(pending.ApprovedAtUtc);
         await fixture.Initializer.InitializeAsync();
 
-        Assert.Equal(FacilityStatus.Approved, pending.Status);
+        Assert.Equal(FacilityStatus.Pending, pending.Status);
+        Assert.Null(pending.ApprovedAtUtc);
         Assert.Null(pending.ApprovedByUserId);
-        Assert.True(automaticApprovalAt <= DateTime.UtcNow);
         Assert.Equal(approvedAt, approved.ApprovedAtUtc);
         Assert.Equal(FacilityStatus.Approved, approved.Status);
         Assert.Equal(FacilityStatus.Rejected, rejected.Status);
         Assert.Equal(FacilityStatus.Suspended, suspended.Status);
         Assert.False((await fixture.Context.Users.SingleAsync(user => user.Id == "inactive-admin")).IsActive);
         var inventory = await fixture.Context.BloodInventory.Where(item => item.FacilityId == pending.Id).ToListAsync();
-        Assert.Equal(Enum.GetValues<BloodType>().Length, inventory.Count);
-        Assert.Equal(Enum.GetValues<BloodType>().ToHashSet(), inventory.Select(item => item.BloodType).ToHashSet());
-        var preserved = inventory.Single(item => item.BloodType == BloodType.BPositive);
-        Assert.Equal((7, 2, 4), (preserved.TotalUnits, preserved.ReservedUnits, preserved.LowStockThreshold));
-        Assert.All(inventory.Where(item => item.BloodType != BloodType.BPositive), item =>
-        {
-            Assert.Equal(0, item.TotalUnits);
-            Assert.Equal(0, item.ReservedUnits);
-            Assert.Equal(10, item.LowStockThreshold);
-        });
-        Assert.Equal(Enum.GetValues<BloodType>().Length, await fixture.Context.BloodInventory.CountAsync(item => item.FacilityId == pending.Id));
-        Assert.Single(await fixture.Context.AuditLogs.Where(log => log.Action == "FacilityAutoApprovedInDevelopment"
-            && log.EntityId == pending.Id).ToListAsync());
-        Assert.Null((await fixture.Context.AuditLogs.SingleAsync(log => log.Action == "FacilityAutoApprovedInDevelopment"
-            && log.EntityId == pending.Id)).ActorUserId);
-    }
-
-    [Theory]
-    [InlineData("Development", false)]
-    [InlineData("Testing", true)]
-    [InlineData("Production", true)]
-    public async Task Auto_approval_is_not_run_when_disabled_or_outside_development(string environment, bool enabled)
-    {
-        await using var fixture = await Fixture.CreateAsync(new Dictionary<string, string?>
-        {
-            ["BloodLink:FacilityRegistration:AutoApproveInDevelopment"] = enabled.ToString()
-        }, environment);
-        var pending = AddFacility(fixture.Context, FacilityStatus.Pending);
-        await fixture.Context.SaveChangesAsync();
-
-        await fixture.Initializer.InitializeAsync();
-
-        Assert.Equal(FacilityStatus.Pending, pending.Status);
-        Assert.Null(pending.ApprovedAtUtc);
-        Assert.Empty(await fixture.Context.AuditLogs.Where(log => log.Action == "FacilityAutoApprovedInDevelopment").ToListAsync());
+        Assert.Single(inventory);
+        var preserved = Assert.Single(inventory);
+        Assert.Equal((BloodType.BPositive, 7, 2, 4), (preserved.BloodType, preserved.TotalUnits, preserved.ReservedUnits, preserved.LowStockThreshold));
+        Assert.Empty(await fixture.Context.AuditLogs.ToListAsync());
     }
 
     private static Facility AddFacility(BloodLinkDbContext context, FacilityStatus status, DateTime? approvedAtUtc = null)
@@ -204,7 +169,7 @@ public sealed class DatabaseInitializerTests
         private readonly ServiceProvider provider;
         private readonly AsyncServiceScope scope;
 
-        private Fixture(ServiceProvider provider, AsyncServiceScope scope, TestEnvironment environment)
+        private Fixture(ServiceProvider provider, AsyncServiceScope scope)
         {
             this.provider = provider;
             this.scope = scope;
@@ -215,26 +180,20 @@ public sealed class DatabaseInitializerTests
                 scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>(),
                 UserManager,
                 scope.ServiceProvider.GetRequiredService<IConfiguration>(),
-                NullLogger<DatabaseInitializer>.Instance,
-                environment);
+                NullLogger<DatabaseInitializer>.Instance);
         }
 
         public BloodLinkDbContext Context { get; }
         public UserManager<ApplicationUser> UserManager { get; }
         public DatabaseInitializer Initializer { get; }
 
-        public static async Task<Fixture> CreateAsync(Dictionary<string, string?>? settings = null, string environmentName = "Development")
+        public static async Task<Fixture> CreateAsync(Dictionary<string, string?>? settings = null)
         {
             var services = new ServiceCollection();
-            var values = new Dictionary<string, string?>
-            {
-                ["BloodLink:FacilityRegistration:AutoApproveInDevelopment"] = "false"
-            };
+            var values = new Dictionary<string, string?>();
             if (settings is not null)
                 foreach (var setting in settings) values[setting.Key] = setting.Value;
             services.AddSingleton<IConfiguration>(new ConfigurationBuilder().AddInMemoryCollection(values).Build());
-            var environment = new TestEnvironment { EnvironmentName = environmentName };
-            services.AddSingleton<IHostEnvironment>(environment);
             services.AddDbContext<BloodLinkDbContext>(options => options.UseInMemoryDatabase(Guid.NewGuid().ToString()));
             services.AddLogging();
             services.AddIdentityCore<ApplicationUser>(options =>
@@ -246,7 +205,7 @@ public sealed class DatabaseInitializerTests
                 .AddEntityFrameworkStores<BloodLinkDbContext>();
             var provider = services.BuildServiceProvider();
             var scope = provider.CreateAsyncScope();
-            var fixture = new Fixture(provider, scope, environment);
+            var fixture = new Fixture(provider, scope);
             await fixture.Context.Database.EnsureCreatedAsync();
             return fixture;
         }
@@ -258,13 +217,4 @@ public sealed class DatabaseInitializerTests
         }
     }
 
-    private sealed class TestEnvironment : IHostEnvironment
-    {
-        public string EnvironmentName { get; set; } = Environments.Development;
-        public string ApplicationName { get; set; } = "BloodLink.Tests";
-        public string WebRootPath { get; set; } = string.Empty;
-        public string ContentRootPath { get; set; } = string.Empty;
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
-    }
 }

@@ -4,7 +4,9 @@ Business workflows are implemented in Application contracts and Infrastructure s
 
 ## Facility onboarding
 
-Anonymous facility registration creates the facility and its first FacilityAdmin account. Development may approve on registration when its explicit Development-only option is enabled; production remains Pending for SystemAdmin review. Approval initializes any missing blood-type inventory rows without replacing existing balances. The client must separately sign in after registration.
+Anonymous facility registration transactionally creates an active facility and its first active FacilityAdmin account, role assignment, complete initial blood-type inventory, and `FacilityRegistered` audit event. The facility is active immediately in every environment, so the administrator can sign in as soon as registration succeeds. The registration response does not create a session.
+
+Existing persisted Pending facilities are legacy records and remain restricted; startup never promotes them. Pending facilities and accounts associated with them require a separately reviewed one-time operational decision. First inspect aggregate status counts and verify each record's legitimacy, completeness, and inventory state without exporting personal data. Then execute an explicitly approved, auditable operation that records the true operator; do not generate a fabricated SystemAdmin approval event. This release does not inspect or modify production records and requires no schema migration.
 
 ## Staff lifecycle
 

@@ -32,6 +32,6 @@ public sealed record FacilityDto(
     DateTime CreatedAtUtc,
     DateTime? ApprovedAtUtc);
 
-public sealed record FacilityDecisionRequest(Guid FacilityId, string? Reason);
+public sealed record FacilityLifecycleRequest(Guid FacilityId, string? Reason);
 public sealed record UpdateFacilityRequest(string Address, string ContactEmail, string ContactPhone);
 public sealed record FacilityQueryRequest(FacilityStatus? Status);

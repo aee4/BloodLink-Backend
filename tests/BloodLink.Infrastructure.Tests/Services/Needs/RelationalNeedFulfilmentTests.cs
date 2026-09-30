@@ -83,103 +83,6 @@ public sealed class RelationalNeedFulfilmentTests
     }
 
     [Fact]
-    public async Task FacilityApproval_LoadsAdminsWithFacilityScopedSql()
-    {
-        var commandCapture = new UserRoleQueryCaptureInterceptor();
-        await using var database = await CreateDatabaseAsync(commandCapture);
-        await using (var setup = database.CreateContext())
-        {
-            var facility = await setup.Facilities.SingleAsync(item => item.Id == FacilityId);
-            facility.Status = FacilityStatus.Pending;
-            var targetAdmin = await setup.Users.SingleAsync(user => user.Id == "admin-user");
-            targetAdmin.IsActive = false;
-            var unrelatedAdmin = await setup.Users.SingleAsync(user => user.Id == "source-admin");
-            unrelatedAdmin.IsActive = false;
-            var system = NewUser("system-user", "System", FacilityId);
-            system.FacilityId = null;
-            setup.Users.Add(system);
-            setup.UserRoles.Add(new IdentityUserRole<string>
-            {
-                UserId = system.Id,
-                RoleId = RoleNames.SystemAdmin
-            });
-            await setup.SaveChangesAsync();
-        }
-
-        commandCapture.Reset();
-        var currentUser = new FakeCurrentUserService
-        {
-            UserId = "system-user",
-            FacilityId = null,
-            Roles = [RoleNames.SystemAdmin]
-        };
-        await using (var serviceDb = database.CreateContext())
-        {
-            var service = new FacilityService(serviceDb, currentUser);
-            await service.ApproveAsync(new FacilityDecisionRequest(FacilityId, null));
-        }
-
-        var roleQueries = commandCapture.Commands
-            .Where(command => command.Contains("AspNetUserRoles", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-        var activationQuery = Assert.Single(roleQueries);
-        Assert.Contains("FacilityId", activationQuery, StringComparison.OrdinalIgnoreCase);
-
-        await using var verify = database.CreateContext();
-        Assert.True((await verify.Users.SingleAsync(user => user.Id == "admin-user")).IsActive);
-        Assert.False((await verify.Users.SingleAsync(user => user.Id == "source-admin")).IsActive);
-    }
-
-    [Fact]
-    public async Task FacilityRejection_ReusesFacilityUsersForNotifications()
-    {
-        var commandCapture = new UserRoleQueryCaptureInterceptor();
-        await using var database = await CreateDatabaseAsync(commandCapture);
-        await using (var setup = database.CreateContext())
-        {
-            var facility = await setup.Facilities.SingleAsync(item => item.Id == FacilityId);
-            facility.Status = FacilityStatus.Pending;
-            var system = NewUser("system-user", "System", FacilityId);
-            system.FacilityId = null;
-            setup.Users.Add(system);
-            setup.UserRoles.Add(new IdentityUserRole<string>
-            {
-                UserId = system.Id,
-                RoleId = RoleNames.SystemAdmin
-            });
-            await setup.SaveChangesAsync();
-        }
-
-        commandCapture.Reset();
-        var currentUser = new FakeCurrentUserService
-        {
-            UserId = "system-user",
-            FacilityId = null,
-            Roles = [RoleNames.SystemAdmin]
-        };
-        await using (var serviceDb = database.CreateContext())
-        {
-            var service = new FacilityService(serviceDb, currentUser);
-            await service.RejectAsync(new FacilityDecisionRequest(FacilityId, "Registration evidence incomplete"));
-        }
-
-        var facilityUserReads = commandCapture.Commands
-            .Where(command => command.Contains("FROM [AspNetUsers]", StringComparison.OrdinalIgnoreCase)
-                && command.Contains("FacilityId", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-        Assert.Single(facilityUserReads);
-
-        await using var verify = database.CreateContext();
-        Assert.False((await verify.Users.SingleAsync(user => user.Id == "admin-user")).IsActive);
-        Assert.False((await verify.Users.SingleAsync(user => user.Id == "staff-user")).IsActive);
-        Assert.True((await verify.Users.SingleAsync(user => user.Id == "source-admin")).IsActive);
-        Assert.Equal(
-            new[] { "admin-user", "staff-user" },
-            await verify.Notifications.Where(item => item.RelatedEntityId == FacilityId)
-                .Select(item => item.RecipientUserId).OrderBy(id => id).ToArrayAsync());
-    }
-
-    [Fact]
     public async Task NotificationList_UsesSqlPagingAndMarkAllReadUpdatesOnlyOwnRows()
     {
         var queryCounter = new ReaderCommandCounter();
@@ -392,10 +295,11 @@ public sealed class RelationalNeedFulfilmentTests
         };
         var systemDashboard = await new DashboardService(systemDb, systemUser).GetSystemAdminDashboardAsync();
 
-        Assert.Equal(40, systemDashboard.PendingFacilities);
-        Assert.Equal(6, systemDashboard.PendingReviews.Count);
+        Assert.Equal(2, systemDashboard.ActiveFacilities);
+        Assert.Equal(0, systemDashboard.SuspendedFacilities);
+        Assert.Equal(42, systemDashboard.TotalFacilities);
         Assert.Equal(8, systemDashboard.RecentActivity.Count);
-        Assert.Equal(6, queryCounter.ReadCommands);
+        Assert.Equal(5, queryCounter.ReadCommands);
 
         queryCounter.Reset();
         await using var staffDb = database.CreateContext();

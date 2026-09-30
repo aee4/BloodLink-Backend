@@ -11,13 +11,11 @@ Common failures: 400 malformed/invalid input, 401 missing/invalid/expired bearer
 | `GET /auth/me` | none; `ApiUserResponse` | `AccountSession`; own current account | 200; 401/403/404. Read only. |
 | `POST /auth/logout` | none; empty | `AccountSession`; current user | 204; 401/403/503. Rotates security stamp, revoking all current tokens. |
 | `POST /auth/change-password` | `ChangePasswordRequest`; empty | `AccountSession`; current user | 204; 400/401/403/503. Identity password and stamp update plus audit. |
-| `POST /facilities/register` | `RegisterFacilityBody`; `FacilityDto` | Anonymous; facility/admin created as one workflow | 201; 400/409. Facility, admin identity/role, audit and applicable initial inventory. Development-only auto-approval; production Pending. |
+| `POST /facilities/register` | `RegisterFacilityBody`; active `FacilityDto` | Anonymous; facility/admin created as one workflow | 201; 400/409. Active facility, admin identity/role, audit and complete initial inventory are created transactionally in every environment. Sign in separately after registration. |
 | `GET /facilities/me` | none; `FacilityDto` | Approved facility user; own server-resolved facility | 200; 401/403/404. Read only. |
 | `PUT /facilities/me` | `FacilityUpdateBody`; empty | FacilityAdmin; own facility | 204; 400/401/403/404. Facility contact data and audit. |
 | `GET /system/facilities` | `status`, `page`, `pageSize`; paged `FacilityDto` | SystemAdmin | 200; 401/403. Read only. |
 | `GET /system/facilities/{id}` | none; `FacilityDto` | SystemAdmin | 200; 401/403/404. Read only. |
-| `POST /system/facilities/{id}/approve` | none; empty | SystemAdmin | 204; 401/403/404/409. Status, audit, and missing inventory initialization atomically. |
-| `POST /system/facilities/{id}/reject` | `DecisionBody`; empty | SystemAdmin | 204; 400/401/403/404/409. Status and audit. |
 | `POST /system/facilities/{id}/suspend` | `DecisionBody`; empty | SystemAdmin | 204; 400/401/403/404/409. Status/reason and audit. |
 | `POST /system/facilities/{id}/restore` | none; empty | SystemAdmin | 204; 401/403/404/409. Status and audit. |
 | `GET /staff` | `page`, `pageSize`; paged `StaffDto` | FacilityAdmin; own facility | 200; 401/403. Read only. |
