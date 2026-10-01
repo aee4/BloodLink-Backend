@@ -7,4 +7,5 @@ public interface IDashboardService
     Task<SystemDashboardDto> GetSystemAdminDashboardAsync(CancellationToken cancellationToken = default);
     Task<FacilityAdminDashboardDto> GetFacilityAdminDashboardAsync(CancellationToken cancellationToken = default);
     Task<StaffDashboardDto> GetFacilityStaffDashboardAsync(CancellationToken cancellationToken = default);
+    Task<PagedResult<DashboardActivityDto>> GetActivityAsync(PageRequest? page = null, CancellationToken cancellationToken = default);
 }

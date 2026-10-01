@@ -15,6 +15,37 @@ public sealed class DashboardService(
     private static readonly BloodRequestStatus[] ActiveRequestStatuses =
     [BloodRequestStatus.Sent, BloodRequestStatus.Accepted];
 
+    public async Task<PagedResult<DashboardActivityDto>> GetActivityAsync(PageRequest? page = null, CancellationToken cancellationToken = default)
+    {
+        var request = page ?? new PageRequest();
+        IQueryable<BloodLink.Domain.Entities.AuditLog> activity;
+        if (currentUser.IsInRole(RoleNames.SystemAdmin))
+        {
+            ServiceGuards.RequireSystemAdmin(currentUser);
+            activity = dbContext.AuditLogs.AsNoTracking();
+        }
+        else if (currentUser.IsInRole(RoleNames.FacilityAdmin))
+        {
+            var facilityId = ServiceGuards.RequireFacilityRole(currentUser, RoleNames.FacilityAdmin);
+            await ServiceGuards.RequireApprovedFacilityAsync(dbContext, facilityId, cancellationToken);
+            activity = dbContext.AuditLogs.AsNoTracking().Where(log => log.FacilityId == facilityId);
+        }
+        else
+        {
+            throw new UnauthorizedAccessException("You are not authorized to view activity history.");
+        }
+
+        var size = request.SafeSize;
+        var items = await activity
+            .OrderByDescending(log => log.CreatedAtUtc).ThenBy(log => log.Id)
+            .Select(log => new DashboardActivityDto(log.Action, log.Summary, log.CreatedAtUtc, log.EntityType, log.EntityId))
+            .Skip(request.SafeOffset).Take(size + 1)
+            .ToListAsync(cancellationToken);
+        var hasNext = items.Count > size;
+        if (hasNext) items.RemoveAt(size);
+        return new PagedResult<DashboardActivityDto>(items.AsReadOnly(), request.SafeNumber, size, hasNext);
+    }
+
     public async Task<SystemDashboardDto> GetSystemAdminDashboardAsync(CancellationToken cancellationToken = default)
     {
         ServiceGuards.RequireSystemAdmin(currentUser);

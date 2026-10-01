@@ -54,7 +54,7 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
             "/api/v1/requests/{id}", "/api/v1/requests/{id}/timeline", "/api/v1/requests/{id}/accept",
             "/api/v1/requests/{id}/reject", "/api/v1/requests/{id}/cancel", "/api/v1/requests/{id}/fulfil",
             "/api/v1/notifications", "/api/v1/notifications/unread-count", "/api/v1/notifications/{id}/read",
-            "/api/v1/notifications/read-all", "/api/v1/dashboard"
+            "/api/v1/notifications/read-all", "/api/v1/dashboard", "/api/v1/activity"
         };
         foreach (var path in expectedPaths) Assert.True(paths.TryGetProperty(path, out _), $"Missing OpenAPI path {path}.");
         Assert.False(paths.TryGetProperty("/api/v1/system/facilities/{id}/approve", out _));
@@ -62,6 +62,7 @@ public sealed class ApiIntegrationTests(ApiDatabaseFixture fixture)
         Assert.False(paths.TryGetProperty("/api/v1/auth/reset-password", out _));
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/inventory")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/v1/activity")).StatusCode);
         using var invalid = await client.PostAsJsonAsync("/api/v1/auth/login", new { email = fixture.AdminEmail, password = "WrongPassword" });
         Assert.Equal(HttpStatusCode.Unauthorized, invalid.StatusCode);
     }
