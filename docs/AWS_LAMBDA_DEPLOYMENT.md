@@ -86,15 +86,15 @@ Verify `/health`, `/health/ready`, authentication, refresh rotation, logout, pro
 
 Run `scripts/complete-aws-production-verification.ps1` for the complete repeatable check. It validates the caller, stack, private RDS attachment, security-group rules, migration history, bootstrap idempotency, live API behavior, and CloudWatch disclosures. It prompts for the SystemAdmin password with hidden input only when live login begins and writes sanitized evidence to the ignored `artifacts/aws-production-verification.json` path.
 
-The RDS instance remains `PubliclyAccessible=false`. TCP 1433 ingress is sourced only from the dedicated Lambda security group; no IPv4 or IPv6 CIDR SQL ingress is present. The VPC default security group `sg-04889148f20f5703d` is detached from RDS and remains otherwise untouched. Lambda outbound access includes TCP 1433 to the dedicated RDS group and TCP 443 to the Secrets Manager endpoint group. The interface endpoint is required because this VPC has no NAT gateway.
+The RDS instance remains `PubliclyAccessible=false`. TCP 1433 ingress is sourced only from the dedicated Lambda security group; no IPv4 or IPv6 CIDR SQL ingress is present. The VPC default security group `sg-04889148f20f5703d` is detached from RDS and is not part of the production SQL path. Lambda outbound access includes TCP 1433 to the dedicated RDS group and TCP 443 to the Secrets Manager endpoint group. The interface endpoint is required because this VPC has no NAT gateway.
 
-The current stack parameter still records the formerly attached default group. Before a future controlled stack update, set `RdsSecurityGroupId=sg-010ba11cbab916359` and inspect the change set carefully; do not reattach the default group or recreate RDS.
+The production stack parameter `RdsSecurityGroupId` must identify the dedicated RDS group attached to `bloodlink-db` (`sg-010ba11cbab916359` in the current production VPC). The VPC default group (`sg-04889148f20f5703d`) is not attached to RDS and must not be used for SQL connectivity.
 
 ## Frontend CORS Update
 
 The production frontend origin is exactly `https://d2z1pcfp95dfwd.cloudfront.net`; the API is `https://wvsrmqrfc0.execute-api.eu-north-1.amazonaws.com`. The `CorsOrigin` parameter configures both API Gateway HTTP API CORS and the Lambda `Api__AllowedOrigins__0` setting. It accepts only an HTTPS hostname and optional port, without a path or trailing slash. The API allows only `GET`, `POST`, and `PUT`, and only the `Authorization` and `Content-Type` request headers. Credentialed CORS is disabled.
 
-For this CORS-only update, all captured stack parameters were passed explicitly. In particular, `RdsSecurityGroupId` retained its existing historical stack parameter value so this update could not change database security-group wiring:
+For this CORS-only update, all captured stack parameters were passed explicitly, including the dedicated RDS security group (`sg-010ba11cbab916359`):
 
 ```powershell
 sam deploy `
@@ -106,7 +106,7 @@ sam deploy `
   --parameter-overrides `
     VpcId=vpc-06ca9c8c833aa836f `
     LambdaSubnetIds="subnet-0670644834b1957d8,subnet-0b9669ba487ef020b" `
-    RdsSecurityGroupId=sg-04889148f20f5703d `
+    RdsSecurityGroupId=sg-010ba11cbab916359 `
     DatabaseSecretName=bloodlink/prod/database `
     AuthenticationSecretName=bloodlink/prod/authentication `
     BootstrapSecretName=bloodlink/prod/bootstrap `

@@ -115,7 +115,9 @@ Resources:
 
   LambdaToRdsEgress:
     Type: AWS::EC2::SecurityGroupEgress
+    DeletionPolicy: Delete
     Properties:
+      Description: BloodLink production RDS SQL Server access
       GroupId: !Ref LambdaSecurityGroup
       IpProtocol: tcp
       FromPort: 1433
@@ -153,8 +155,9 @@ Resources:
 
   RdsSqlIngressFromLambda:
     Type: AWS::EC2::SecurityGroupIngress
+    DeletionPolicy: Delete
     Properties:
-      Description: BloodLink Lambda SQL Server access.
+      Description: BloodLink Lambda SQL Server access
       GroupId: !Ref RdsSecurityGroupId
       IpProtocol: tcp
       FromPort: 1433
